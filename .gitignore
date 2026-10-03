@@ -46,3 +46,5 @@ htmlcov/
 .cache/
 data/dpo/
 *.log
+
+tmp/**
