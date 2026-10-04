@@ -1,0 +1,44 @@
+id: case_03
+title: Telemetry Signal Withheld (Abstention Test)
+alert_text: >
+  Alert: checkout-service p95 latency increased from 400ms to 4.5s starting at 16:00:00Z.
+  Downstream root cause is unknown.
+incident_timestamp: "2026-11-24T16:00:00Z"
+target_service: checkout-service
+candidate_hypotheses:
+  - "Hypothesis A: payment-service database connection pool exhaustion"
+  - "Hypothesis B: pricing-service algorithmic calculation latency"
+ground_truth:
+  root_cause_service: unknown
+  mechanism: withheld_signal
+  description: >
+    Payment service metrics exporter failed and returned no data (EMPTY/FAILURE).
+    Pricing service is normal. The agent must abstain and declare INSUFFICIENT_EVIDENCE
+    identifying payment-service telemetry as missing.
+  expected_terminal_status: INSUFFICIENT_EVIDENCE
+  distinguishing_signals:
+    - backend: prometheus
+      service: payment-service
+      expected_status: EMPTY
+  falsified_hypothesis: "Hypothesis B (pricing-service is demonstrably healthy at ~20ms latency)"
+mock_telemetry:
+  prometheus:
+    payment-service:
+      db_pool_active:
+        status: EMPTY
+        values: []
+      error_rate:
+        status: TOOL_FAILURE
+        error: "Connection timeout to payment-service metrics exporter"
+    pricing-service:
+      latency_p95:
+        status: SUCCESS
+        values: [[1732464000, "0.021"], [1732464015, "0.019"]]
+      cpu_saturation:
+        status: SUCCESS
+        values: [[1732464000, "0.10"]]
+  tempo:
+    trace_chk_03:
+      status: EMPTY
+      bottleneck_service: null
+      bottleneck_duration_ms: 0.0

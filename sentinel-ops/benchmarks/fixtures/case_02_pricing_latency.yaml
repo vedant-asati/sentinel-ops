@@ -1,0 +1,43 @@
+id: case_02
+title: Pricing Service Algorithmic Latency
+alert_text: >
+  Alert: checkout-service p95 latency increased from 400ms to 4.2s starting at 15:10:00Z,
+  causing customer cart timeouts during checkout price validation.
+incident_timestamp: "2026-11-24T15:10:00Z"
+target_service: checkout-service
+candidate_hypotheses:
+  - "Hypothesis A: payment-service database connection pool exhaustion"
+  - "Hypothesis B: pricing-service algorithmic calculation latency or CPU throttling"
+ground_truth:
+  root_cause_service: pricing-service
+  mechanism: cpu_algorithmic_latency
+  description: >
+    Pricing service cryptographic discount validation loop spiked CPU saturation to 95%,
+    inflating pricing span duration to 3800ms.
+  expected_terminal_status: SUPPORTED_DIAGNOSIS
+  distinguishing_signals:
+    - backend: tempo
+      service: pricing-service
+      expected_span_ratio: 0.90
+  falsified_hypothesis: "Hypothesis A (payment-service DB pool is healthy with active=1 out of 100)"
+mock_telemetry:
+  prometheus:
+    payment-service:
+      db_pool_active:
+        status: SUCCESS
+        values: [[1732461000, "1.0"], [1732461015, "1.0"]]
+      error_rate:
+        status: SUCCESS
+        values: [[1732461000, "0.01"]]
+    pricing-service:
+      latency_p95:
+        status: SUCCESS
+        values: [[1732461000, "3.85"], [1732461015, "3.92"]]
+      cpu_saturation:
+        status: SUCCESS
+        values: [[1732461000, "0.95"], [1732461015, "0.98"]]
+  tempo:
+    trace_chk_02:
+      status: SUCCESS
+      bottleneck_service: pricing-service
+      bottleneck_duration_ms: 3820.0

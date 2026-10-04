@@ -1,0 +1,45 @@
+id: case_01
+title: Payment DB Connection Pool Exhaustion
+alert_text: >
+  Alert: checkout-service p95 latency increased from 400ms to 4.5s starting at 14:32:00Z,
+  and downstream HTTP 504 Gateway Timeout error rate increased by 22%.
+incident_timestamp: "2026-11-24T14:32:00Z"
+target_service: checkout-service
+candidate_hypotheses:
+  - "Hypothesis A: payment-service database connection pool exhaustion causing downstream thread wait"
+  - "Hypothesis B: pricing-service algorithmic calculation latency or CPU throttling"
+ground_truth:
+  root_cause_service: payment-service
+  mechanism: db_pool_exhaustion
+  description: >
+    Payment Service database connection pool was reduced to 2, causing total pool saturation
+    and queuing of checkout transactions.
+  expected_terminal_status: SUPPORTED_DIAGNOSIS
+  distinguishing_signals:
+    - backend: prometheus
+      service: payment-service
+      metric_type: db_pool_active
+      expected_value: 2.0
+      is_saturated: true
+  falsified_hypothesis: "Hypothesis B (pricing-service latency is normal at ~25ms)"
+mock_telemetry:
+  prometheus:
+    payment-service:
+      db_pool_active:
+        status: SUCCESS
+        values: [[1732458720, "2.0"], [1732458735, "2.0"], [1732458750, "2.0"]]
+      error_rate:
+        status: SUCCESS
+        values: [[1732458720, "0.24"], [1732458735, "0.28"]]
+    pricing-service:
+      latency_p95:
+        status: SUCCESS
+        values: [[1732458720, "0.025"], [1732458735, "0.024"]]
+      cpu_saturation:
+        status: SUCCESS
+        values: [[1732458720, "0.12"], [1732458735, "0.11"]]
+  tempo:
+    trace_chk_01:
+      status: SUCCESS
+      bottleneck_service: payment-service
+      bottleneck_duration_ms: 4120.0
