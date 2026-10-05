@@ -1,0 +1,63 @@
+services:
+  checkout-service:
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ./synthetic:/app
+    command: sh -c "pip install fastapi uvicorn && python services.py"
+    environment:
+      - SERVICE_NAME=checkout-service
+      - PORT=8001
+    ports:
+      - "8001:8001"
+
+  cart-service:
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ./synthetic:/app
+    command: sh -c "pip install fastapi uvicorn && python services.py"
+    environment:
+      - SERVICE_NAME=cart-service
+      - PORT=8002
+    ports:
+      - "8002:8002"
+
+  pricing-service:
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ./synthetic:/app
+    command: sh -c "pip install fastapi uvicorn && python services.py"
+    environment:
+      - SERVICE_NAME=pricing-service
+      - PORT=8003
+    ports:
+      - "8003:8003"
+
+  payment-service:
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ./synthetic:/app
+    command: sh -c "pip install fastapi uvicorn && python services.py"
+    environment:
+      - SERVICE_NAME=payment-service
+      - PORT=8004
+    ports:
+      - "8004:8004"
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "59090:9090"
+
+  tempo:
+    image: grafana/tempo:2.4.1
+    command: ["-config.file=/etc/tempo.yml"]
+    volumes:
+      - ./tempo/tempo.yml:/etc/tempo.yml
+    ports:
+      - "53201:53201"
