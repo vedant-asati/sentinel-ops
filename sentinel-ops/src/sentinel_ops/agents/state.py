@@ -67,6 +67,7 @@ class InvestigationState(BaseModel):
     crag_iterations: int = 0
     crag_sufficient: bool = False
     missing_evidence_hints: List[str] = Field(default_factory=list)
+    simulated_telemetry: Optional[Dict[str, Any]] = None
     
     # Diagnosis & Claims
     structured_claims: List[AtomicClaim] = Field(default_factory=list)

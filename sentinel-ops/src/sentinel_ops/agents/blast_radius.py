@@ -36,3 +36,25 @@ def calculate_reverse_blast_radius(target_service: str, action: str = "restart")
         "blast_radius_level": level,
         "summary": f"Modifying '{target_service}' potentially impacts {len(affected_callers)} caller(s): {affected_callers} (Score: {score:.2f}, {level} Risk)"
     }
+
+
+def blast_radius_node(state: Any) -> Dict[str, Any]:
+    """Calculates upstream blast radius for the diagnosed root cause service."""
+    # Find diagnosed root cause service from claims
+    root_cause_service = "checkout-service"
+    for claim in state.structured_claims:
+        if claim.claim_type == "root_cause":
+            if "payment-service" in claim.statement:
+                root_cause_service = "payment-service"
+            elif "pricing-service" in claim.statement:
+                root_cause_service = "pricing-service"
+            break
+
+    res = calculate_reverse_blast_radius(root_cause_service, action="db_pool_resize" if root_cause_service == "payment-service" else "restart")
+    proposal = f"Apply targeted mitigation on '{root_cause_service}': {res['summary']}"
+    return {
+        "affected_callers": res["affected_callers"],
+        "blast_radius_score": res["blast_radius_score"],
+        "remediation_proposal": proposal,
+    }
+
