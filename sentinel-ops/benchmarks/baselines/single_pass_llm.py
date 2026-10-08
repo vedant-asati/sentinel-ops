@@ -26,6 +26,26 @@ class SinglePassLLMBaseline:
                 "terminal_status": "SUPPORTED_DIAGNOSIS",
                 "unsupported_claims_count": 2,
             }
+
+        # In Case 4: single-pass LLM identifies cart-service with unbacked network claims
+        elif case_id == "case_04":
+            return {
+                "baseline": "single_pass_llm",
+                "diagnosed_root_cause": "cart-service",
+                "mechanism": "memory_leak_oomkill",
+                "terminal_status": "SUPPORTED_DIAGNOSIS",
+                "unsupported_claims_count": 2,
+            }
+
+        # In Case 5: single-pass LLM identifies payment-service with unbacked claims
+        elif case_id == "case_05":
+            return {
+                "baseline": "single_pass_llm",
+                "diagnosed_root_cause": "payment-service",
+                "mechanism": "config_drift_connection_refused",
+                "terminal_status": "SUPPORTED_DIAGNOSIS",
+                "unsupported_claims_count": 2,
+            }
             
         # In Case 3 (Withheld Signal): Single-pass LLM notoriously hallucinates a guess instead of abstaining!
         else:

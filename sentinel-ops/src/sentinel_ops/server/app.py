@@ -190,6 +190,8 @@ async def get_dashboard():
                 <option value="case_01">Case 01: Payment DB Pool Exhaustion</option>
                 <option value="case_02">Case 02: Pricing Algorithmic Latency</option>
                 <option value="case_03">Case 03: Telemetry Withheld (Abstention)</option>
+                <option value="case_04">Case 04: Cart Memory Leak & OOM Killer</option>
+                <option value="case_05">Case 05: Gateway Configuration Drift (502 Bad Gateway)</option>
             </select>
             <button onclick="runTriage(document.getElementById('caseSelector').value)" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs px-3 py-1.5 rounded transition">RUN TRIAGE</button>
         </div>

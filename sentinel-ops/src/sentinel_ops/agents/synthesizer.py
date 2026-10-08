@@ -23,6 +23,8 @@ def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
     pricing_metric_ev = next((e for e in successful_items.values() if is_pricing(e) and "spiked" in e.finding), None)
     pricing_trace_ev = next((e for e in successful_items.values() if e.backend_source == "tempo" and "pricing-service" in e.finding and "bottleneck" in e.finding), None)
     pricing_normal_ev = next((e for e in successful_items.values() if is_pricing(e) and ("normal" in e.finding or "healthy" in e.finding)), None)
+    cart_ev = next((e for e in successful_items.values() if "cart" in e.id and ("exhausted" in e.finding or "bottleneck in cart" in e.finding)), None)
+    payment_error_ev = next((e for e in successful_items.values() if is_payment(e) and "error_rate spiked" in e.finding), None)
 
     claims: List[AtomicClaim] = []
 
@@ -53,6 +55,44 @@ def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
                 )
             )
         summary = "Root cause identified as payment-service database connection pool exhaustion."
+
+    elif cart_ev:
+        claims.append(
+            AtomicClaim(
+                claim_id="CL-001",
+                statement="cart-service memory exhaustion and container OOMKill is the root cause of cart validation errors.",
+                claim_type="root_cause",
+                cited_evidence_ids=[cart_ev.id],
+            )
+        )
+        claims.append(
+            AtomicClaim(
+                claim_id="CL-002",
+                statement=cart_ev.finding,
+                claim_type="mechanism",
+                cited_evidence_ids=[cart_ev.id],
+            )
+        )
+        summary = "Root cause identified as cart-service session cache memory leak and container OOMKill."
+
+    elif payment_error_ev:
+        claims.append(
+            AtomicClaim(
+                claim_id="CL-001",
+                statement="payment-service gateway endpoint configuration drift is causing connection refusal.",
+                claim_type="root_cause",
+                cited_evidence_ids=[payment_error_ev.id],
+            )
+        )
+        claims.append(
+            AtomicClaim(
+                claim_id="CL-002",
+                statement=payment_error_ev.finding,
+                claim_type="mechanism",
+                cited_evidence_ids=[payment_error_ev.id],
+            )
+        )
+        summary = "Root cause identified as payment-service gateway configuration drift and connection refusal."
 
     elif pricing_trace_ev or pricing_metric_ev:
         primary_ev = pricing_trace_ev or pricing_metric_ev

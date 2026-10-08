@@ -48,6 +48,8 @@ def blast_radius_node(state: Any) -> Dict[str, Any]:
                 root_cause_service = "payment-service"
             elif "pricing-service" in claim.statement:
                 root_cause_service = "pricing-service"
+            elif "cart-service" in claim.statement:
+                root_cause_service = "cart-service"
             break
 
     res = calculate_reverse_blast_radius(root_cause_service, action="db_pool_resize" if root_cause_service == "payment-service" else "restart")

@@ -37,7 +37,34 @@ class DeterministicRuleBaseline:
                     "confidence": 0.85,
                 }
 
-        # Rule 3: Check trace bottleneck
+        # Rule 3: Cart memory exhaustion check
+        cart_prom = prom.get("cart-service", {})
+        mem_usage = cart_prom.get("memory_usage", {})
+        if mem_usage.get("status") == "SUCCESS":
+            values = mem_usage.get("values", [])
+            if values and float(values[-1][1]) >= 0.90:
+                return {
+                    "baseline": "deterministic_rules",
+                    "diagnosed_root_cause": "cart-service",
+                    "mechanism": "memory_leak_oomkill",
+                    "terminal_status": "SUPPORTED_DIAGNOSIS",
+                    "confidence": 0.95,
+                }
+
+        # Rule 4: Payment connection refusal check
+        pay_err = payment_prom.get("error_rate", {})
+        if pay_err.get("status") == "SUCCESS":
+            values = pay_err.get("values", [])
+            if values and float(values[-1][1]) >= 0.90:
+                return {
+                    "baseline": "deterministic_rules",
+                    "diagnosed_root_cause": "payment-service",
+                    "mechanism": "config_drift_connection_refused",
+                    "terminal_status": "SUPPORTED_DIAGNOSIS",
+                    "confidence": 0.90,
+                }
+
+        # Rule 5: Check trace bottleneck
         for trace_id, trace_data in tempo.items():
             if trace_data.get("status") == "SUCCESS":
                 bottleneck = trace_data.get("bottleneck_service")

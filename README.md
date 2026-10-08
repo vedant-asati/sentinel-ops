@@ -103,17 +103,19 @@
 
 ## 📊 Benchmark Replay Matrix
 
-Sentinel-Ops is evaluated across 3 held-out incident cases against deterministic heuristic rules and an ungrounded single-pass LLM baseline:
+Sentinel-Ops is evaluated across 5 held-out incident cases against deterministic heuristic rules and an ungrounded single-pass LLM baseline:
 
 | Case ID | Incident Ground Truth | Deterministic Rules | Single-Pass LLM | Sentinel-Ops LangGraph Agent |
 | :--- | :--- | :--- | :--- | :--- |
 | **`case_01`** | `payment-service` (DB pool exhaustion) | `payment-service` [SUPP] | `payment-service` [SUPP] | **`payment-service` (SUPPORTED)** |
 | **`case_02`** | `pricing-service` (CPU latency spike) | `pricing-service` [SUPP] | `pricing-service` [SUPP] | **`pricing-service` (SUPPORTED)** |
 | **`case_03`** | `unknown` (Telemetry signal withheld) | `unknown` [INSU] | `checkout-service` [SUPP] *(Hallucinated!)* | **`ABSTAINED` (INSUFFICIENT)** |
+| **`case_04`** | `cart-service` (Memory leak & OOM killer) | `cart-service` [SUPP] | `cart-service` [SUPP] | **`cart-service` (SUPPORTED)** |
+| **`case_05`** | `payment-service` (Config drift / 502 Gateway) | `payment-service` [SUPP] | `payment-service` [SUPP] | **`payment-service` (SUPPORTED)** |
 
 **Architectural Metrics:**
-- **Root-Cause Precision:** 100% across cases with present telemetry.
-- **Correct Abstention Rate:** 100% (refuses to guess on missing signals; single-pass baseline hallucinated a wrong service).
+- **Root-Cause Precision:** 100% across cases with present telemetry (Cases 1, 2, 4, 5).
+- **Correct Abstention Rate:** 100% (Case 3: refuses to guess on missing signals; single-pass baseline hallucinated a wrong service).
 - **Citation Contract Entailment:** 100% of claims cite verified observations.
 
 ---
@@ -136,6 +138,12 @@ Sentinel-Ops is evaluated across 3 held-out incident cases against deterministic
 - Python 3.12+
 - `uv` package manager (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
 - Docker & Docker Compose (for the live microservices sandbox)
+
+### 0. One-Command Live Showcase (All-in-One)
+```bash
+./demo.sh
+```
+Runs a complete live demonstration: checks Docker microservices sandbox, injects chaos fault, scrapes Prometheus telemetry, runs multi-agent RCA triage, generates DORA acceleration metrics, and cleanly recovers sandbox services.
 
 ### 1. Run Complete Automated Test Suite (22 Tests)
 ```bash
@@ -160,6 +168,12 @@ uv run python -m sentinel_ops.cli --case-id case_02
 
 # Triage Case 03 (Abstention on Withheld Telemetry)
 uv run python -m sentinel_ops.cli --case-id case_03
+
+# Triage Case 04 (Cart Memory Leak & OOM Killer)
+uv run python -m sentinel_ops.cli --case-id case_04
+
+# Triage Case 05 (Gateway Configuration Drift)
+uv run python -m sentinel_ops.cli --case-id case_05
 ```
 
 ### 4. Cyber Command Center Web Dashboard

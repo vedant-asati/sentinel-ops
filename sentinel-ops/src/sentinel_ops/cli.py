@@ -214,7 +214,7 @@ def run_triage(
 
 def main():
     parser = argparse.ArgumentParser(description="Sentinel-Ops AI SRE Investigation CLI")
-    parser.add_argument("--case-id", default="case_01", choices=["case_01", "case_02", "case_03"], help="Replay case ID")
+    parser.add_argument("--case-id", default="case_01", choices=["case_01", "case_02", "case_03", "case_04", "case_05"], help="Replay case ID")
     parser.add_argument("--auto-approve", action="store_true", help="Bypass interactive HITL approval prompt")
     parser.add_argument("--no-dpo", action="store_true", help="Disable DPO trajectory export")
 

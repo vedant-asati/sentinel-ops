@@ -26,7 +26,21 @@ def crag_sufficiency_node(state: InvestigationState) -> Dict[str, Any]:
         for e in successful_items
     )
 
-    is_sufficient = has_payment_saturation or has_pricing_bottleneck
+    has_cart_memory_exhaustion = any(
+        ("cart" in e.finding and ("exhausted" in e.finding or "OOM" in e.finding or "bottleneck in cart" in e.finding))
+        for e in successful_items
+    )
+    has_payment_error_spike = any(
+        ("payment" in e.finding and ("spiked critically" in e.finding or "connection failure" in e.finding))
+        for e in successful_items
+    )
+
+    is_sufficient = (
+        has_payment_saturation
+        or has_pricing_bottleneck
+        or has_cart_memory_exhaustion
+        or has_payment_error_spike
+    )
     new_iteration = state.crag_iterations + 1
 
     missing_hints = []

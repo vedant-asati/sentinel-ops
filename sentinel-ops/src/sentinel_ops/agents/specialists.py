@@ -33,6 +33,16 @@ async def metrics_specialist_node(payload: Dict[str, Any]) -> Dict[str, List[Evi
                     finding = f"{service} latency_p95 spiked critically at {val}s (anomaly detected)"
                 else:
                     finding = f"{service} latency_p95 normal at {val}s (healthy)"
+            elif metric_type == "memory_usage":
+                if val >= 0.90:
+                    finding = f"{service} memory_usage critically exhausted at {val*100:.0f}% limit (OOM risk)"
+                else:
+                    finding = f"{service} memory_usage normal at {val*100:.0f}%"
+            elif metric_type == "error_rate":
+                if val >= 0.50:
+                    finding = f"{service} error_rate spiked critically to {val*100:.0f}% (connection failure)"
+                else:
+                    finding = f"{service} error_rate normal at {val*100:.0f}%"
             else:
                 finding = f"{service} {metric_type} observed at {val}"
             raw_payload = str(values)

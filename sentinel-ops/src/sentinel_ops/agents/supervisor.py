@@ -72,4 +72,38 @@ def route_supervisor_to_specialists(state: InvestigationState) -> List[Send]:
         )
     )
 
+    # 4. Dispatch Metrics Specialist for cart-service (memory_usage) if cart alert or telemetry present
+    has_cart = "cart" in state.alert_text.lower() or (sim_telem and "cart-service" in sim_telem.get("prometheus", {}))
+    if has_cart:
+        tasks.append(
+            Send(
+                "metrics_specialist",
+                {
+                    "incident_id": state.incident_id,
+                    "service": "cart-service",
+                    "metric_type": "memory_usage",
+                    "observation_window": (state.incident_timestamp, state.incident_timestamp),
+                    "incident_timestamp": state.incident_timestamp,
+                    "simulated_telemetry": sim_telem,
+                },
+            )
+        )
+
+    # 5. Dispatch Metrics Specialist for payment-service error_rate if ECONNREFUSED/error mentioned or present
+    has_pay_err = "refused" in state.alert_text.lower() or "500" in state.alert_text or (sim_telem and "error_rate" in sim_telem.get("prometheus", {}).get("payment-service", {}))
+    if has_pay_err:
+        tasks.append(
+            Send(
+                "metrics_specialist",
+                {
+                    "incident_id": state.incident_id,
+                    "service": "payment-service",
+                    "metric_type": "error_rate",
+                    "observation_window": (state.incident_timestamp, state.incident_timestamp),
+                    "incident_timestamp": state.incident_timestamp,
+                    "simulated_telemetry": sim_telem,
+                },
+            )
+        )
+
     return tasks
