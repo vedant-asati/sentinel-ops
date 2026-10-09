@@ -1,5 +1,7 @@
 import asyncio
 import json
+import logging
+import re
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -13,19 +15,35 @@ from sentinel_ops.agents.graph import compile_investigation_graph
 from sentinel_ops.memory.graph_rag import TopologyGraphRAG
 from sentinel_ops.dpo.trajectory_logger import DPOTrajectoryLogger
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Sentinel-Ops Cyber Command Center", version="1.0.0")
 
 FIXTURES_DIR = Path(__file__).resolve().parents[3] / "benchmarks" / "fixtures"
 
-# In-memory approval ledger
-APPROVAL_LEDGER: Dict[str, Dict[str, Any]] = {}
+# Bounded in-memory approval ledger to prevent OOM
+class BoundedLedger(dict):
+    def __init__(self, maxsize: int = 1000, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.maxsize = maxsize
+
+    def __setitem__(self, key, value):
+        if len(self) >= self.maxsize and key not in self:
+            oldest_key = next(iter(self))
+            del self[oldest_key]
+        super().__setitem__(key, value)
+
+APPROVAL_LEDGER: BoundedLedger = BoundedLedger(maxsize=1000)
 
 
 def load_fixture(case_id: str) -> Optional[Dict[str, Any]]:
     for file in FIXTURES_DIR.glob("*.yaml"):
         if case_id in file.stem:
-            with open(file, "r", encoding="utf-8") as fp:
-                return yaml.safe_load(fp)
+            try:
+                with open(file, "r", encoding="utf-8") as fp:
+                    return yaml.safe_load(fp)
+            except Exception:
+                return None
     return None
 
 
@@ -34,14 +52,20 @@ async def list_incidents():
     """Lists available incident cases."""
     cases = []
     for file in sorted(FIXTURES_DIR.glob("*.yaml")):
-        with open(file, "r", encoding="utf-8") as fp:
-            data = yaml.safe_load(fp)
-            cases.append({
-                "id": data["id"],
-                "title": data.get("title", data["id"]),
-                "target_service": data.get("target_service", "checkout-service"),
-                "timestamp": data.get("incident_timestamp"),
-            })
+        try:
+            with open(file, "r", encoding="utf-8") as fp:
+                data = yaml.safe_load(fp)
+                if not isinstance(data, dict) or "id" not in data:
+                    continue
+                cases.append({
+                    "id": data["id"],
+                    "title": data.get("title", data["id"]),
+                    "target_service": data.get("target_service", "checkout-service"),
+                    "timestamp": data.get("incident_timestamp"),
+                })
+        except Exception as e:
+            logger.warning("Skipping malformed incident fixture %s: %s", file, e)
+            continue
     return {"incidents": cases}
 
 
@@ -53,87 +77,94 @@ async def stream_triage(case_id: str):
         raise HTTPException(status_code=404, detail=f"Case {case_id} not found")
 
     async def event_generator():
-        yield f"data: {json.dumps({'type': 'init', 'incident_id': case_id, 'alert': fixture['alert_text']})}\n\n"
-        await asyncio.sleep(0.3)
-
-        # 1. GraphRAG Prior Knowledge
-        graph_rag = TopologyGraphRAG()
-        matches = graph_rag.retrieve(
-            alert_text=fixture["alert_text"],
-            target_service=fixture["target_service"],
-            incident_timestamp=fixture["incident_timestamp"],
-            top_k=2,
-        )
-        rag_data = [
-            {
-                "id": m["postmortem"].incident_id,
-                "title": m["postmortem"].title,
-                "service": m["postmortem"].root_cause_service,
-                "score": m["composite_score"],
-            }
-            for m in matches
-        ]
-        yield f"data: {json.dumps({'type': 'graph_rag', 'matches': rag_data})}\n\n"
-        await asyncio.sleep(0.4)
-
-        # 2. Multi-Agent Reasoning Execution
-        yield f"data: {json.dumps({'type': 'supervisor', 'status': 'Decomposing incident into parallel hypotheses'})}\n\n"
-        await asyncio.sleep(0.3)
-
-        graph = compile_investigation_graph()
-        initial_state = {
-            "incident_id": case_id,
-            "alert_text": fixture["alert_text"],
-            "incident_timestamp": fixture["incident_timestamp"],
-            "target_service": fixture["target_service"],
-            "simulated_telemetry": fixture.get("mock_telemetry"),
-            "crag_iterations": 0,
-        }
-        config = {"configurable": {"thread_id": f"sse_{case_id}_{uuid.uuid4().hex[:8]}"}}
-        final_state = await graph.ainvoke(initial_state, config=config)
-
-        # 3. Emit Evidence Items
-        evidence_list = [
-            {
-                "id": e.id,
-                "source": e.backend_source,
-                "finding": e.finding,
-                "status": e.status,
-            }
-            for e in final_state.get("evidence", [])
-        ]
-        yield f"data: {json.dumps({'type': 'evidence', 'items': evidence_list})}\n\n"
-        await asyncio.sleep(0.3)
-
-        # 4. Emit Atomic Claims & Citations
-        claims_list = [
-            {
-                "id": c.claim_id,
-                "type": c.claim_type,
-                "statement": c.statement,
-                "citations": c.cited_evidence_ids,
-            }
-            for c in final_state.get("structured_claims", [])
-        ]
-        yield f"data: {json.dumps({'type': 'claims', 'claims': claims_list})}\n\n"
-        await asyncio.sleep(0.3)
-
-        # 5. Emit Adversarial Verdict
-        adv = final_state.get("adversarial_verdict")
-        if adv:
-            yield f"data: {json.dumps({'type': 'adversarial', 'supported': adv.all_claims_supported, 'confidence': adv.confidence, 'critique': adv.critique_hint})}\n\n"
+        try:
+            yield f"data: {json.dumps({'type': 'init', 'incident_id': case_id, 'alert': fixture['alert_text']})}\n\n"
             await asyncio.sleep(0.3)
 
-        # 6. Emit Terminal & Blast Radius
-        blast = {
-            "score": final_state.get("blast_radius_score", 0.0),
-            "callers": final_state.get("affected_callers", []),
-            "remediation": final_state.get("remediation_proposal"),
-            "terminal_status": final_state.get("terminal_status"),
-            "terminal_reason": final_state.get("terminal_reason"),
-            "summary": final_state.get("root_cause_summary"),
-        }
-        yield f"data: {json.dumps({'type': 'terminal', 'data': blast})}\n\n"
+            # 1. GraphRAG Prior Knowledge
+            graph_rag = TopologyGraphRAG()
+            matches = graph_rag.retrieve(
+                alert_text=fixture["alert_text"],
+                target_service=fixture["target_service"],
+                incident_timestamp=fixture["incident_timestamp"],
+                top_k=2,
+            )
+            rag_data = [
+                {
+                    "id": m["postmortem"].incident_id,
+                    "title": m["postmortem"].title,
+                    "service": m["postmortem"].root_cause_service,
+                    "score": m["composite_score"],
+                }
+                for m in matches
+            ]
+            yield f"data: {json.dumps({'type': 'graph_rag', 'matches': rag_data})}\n\n"
+            await asyncio.sleep(0.4)
+
+            # 2. Multi-Agent Reasoning Execution
+            yield f"data: {json.dumps({'type': 'supervisor', 'status': 'Decomposing incident into parallel hypotheses'})}\n\n"
+            await asyncio.sleep(0.3)
+
+            graph = compile_investigation_graph()
+            initial_state = {
+                "incident_id": case_id,
+                "alert_text": fixture["alert_text"],
+                "incident_timestamp": fixture["incident_timestamp"],
+                "target_service": fixture["target_service"],
+                "historical_context": rag_data,
+                "simulated_telemetry": fixture.get("mock_telemetry"),
+                "crag_iterations": 0,
+            }
+            config = {"configurable": {"thread_id": f"sse_{case_id}_{uuid.uuid4().hex[:8]}"}}
+            final_state = await graph.ainvoke(initial_state, config=config)
+
+            # 3. Emit Evidence Items
+            evidence_list = [
+                {
+                    "id": e.id,
+                    "source": e.backend_source,
+                    "finding": e.finding,
+                    "status": e.status,
+                }
+                for e in final_state.get("evidence", [])
+            ]
+            yield f"data: {json.dumps({'type': 'evidence', 'items': evidence_list})}\n\n"
+            await asyncio.sleep(0.3)
+
+            # 4. Emit Atomic Claims & Citations
+            claims_list = [
+                {
+                    "id": c.claim_id,
+                    "type": c.claim_type,
+                    "statement": c.statement,
+                    "citations": c.cited_evidence_ids,
+                }
+                for c in final_state.get("structured_claims", [])
+            ]
+            yield f"data: {json.dumps({'type': 'claims', 'claims': claims_list})}\n\n"
+            await asyncio.sleep(0.3)
+
+            # 5. Emit Adversarial Verdict
+            adv = final_state.get("adversarial_verdict")
+            if adv:
+                yield f"data: {json.dumps({'type': 'adversarial', 'supported': adv.all_claims_supported, 'confidence': adv.confidence, 'critique': adv.critique_hint})}\n\n"
+                await asyncio.sleep(0.3)
+
+            # 6. Emit Terminal & Blast Radius
+            blast = {
+                "score": final_state.get("blast_radius_score", 0.0),
+                "callers": final_state.get("affected_callers", []),
+                "remediation": final_state.get("remediation_proposal"),
+                "recommended_runbook_action": final_state.get("recommended_runbook_action"),
+                "next_discriminating_checks": final_state.get("next_discriminating_checks", []),
+                "terminal_status": final_state.get("terminal_status"),
+                "terminal_reason": final_state.get("terminal_reason"),
+                "summary": final_state.get("root_cause_summary"),
+            }
+            yield f"data: {json.dumps({'type': 'terminal', 'data': blast})}\n\n"
+        except Exception as err:
+            logger.error("SSE stream error during triage for %s: %s", case_id, err)
+            yield f"data: {json.dumps({'type': 'error', 'error': str(err)})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -268,6 +299,16 @@ async def get_dashboard():
     <script>
         let currentCase = 'case_01';
 
+        function escapeHtml(str) {
+            if (!str) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
         function runTriage(caseId) {
             currentCase = caseId;
             const alertBox = document.getElementById('alertBox');
@@ -290,12 +331,12 @@ async def get_dashboard():
                 const msg = JSON.parse(e.data);
 
                 if (msg.type === 'init') {
-                    alertBox.innerHTML = msg.alert;
+                    alertBox.textContent = msg.alert;
                 } else if (msg.type === 'graph_rag') {
                     ragBox.innerHTML = msg.matches.map(m => 
                         `<div class="p-2 bg-black/40 border border-gray-800 rounded">
-                            <div class="flex justify-between text-cyan-300 font-semibold"><span>${m.id}</span><span>Score: ${m.score.toFixed(3)}</span></div>
-                            <div class="text-gray-400 mt-1">${m.title}</div>
+                            <div class="flex justify-between text-cyan-300 font-semibold"><span>${escapeHtml(m.id)}</span><span>Score: ${m.score.toFixed(3)}</span></div>
+                            <div class="text-gray-400 mt-1">${escapeHtml(m.title)}</div>
                         </div>`
                     ).join('');
                 } else if (msg.type === 'supervisor') {
@@ -305,26 +346,36 @@ async def get_dashboard():
                 } else if (msg.type === 'claims') {
                     claimsBox.innerHTML = msg.claims.map(c => 
                         `<div class="p-2.5 bg-black/50 border border-gray-800 rounded">
-                            <div class="flex justify-between text-emerald-400 font-bold"><span>${c.id} [${c.type}]</span><span class="text-yellow-400 font-normal">Cites: ${c.citations.join(', ')}</span></div>
-                            <div class="text-gray-300 mt-1">${c.statement}</div>
+                            <div class="flex justify-between text-emerald-400 font-bold"><span>${escapeHtml(c.id)} [${escapeHtml(c.type)}]</span><span class="text-yellow-400 font-normal">Cites: ${escapeHtml(c.citations.join(', '))}</span></div>
+                            <div class="text-gray-300 mt-1">${escapeHtml(c.statement)}</div>
                         </div>`
                     ).join('');
                 } else if (msg.type === 'adversarial') {
                     verdictBox.innerHTML += `<div class="p-3 bg-black/40 border border-cyan-800/80 rounded">
                         <div class="text-cyan-400 font-bold">Prosecutor Skeptic Verdict: ${msg.supported ? 'ACCEPTED (All Claims Grounded)' : 'REJECTED'}</div>
-                        <div class="text-gray-400 text-xs mt-1">Confidence: ${(msg.confidence * 100).toFixed(0)}% · ${msg.critique || 'Zero unsupported claims'}</div>
+                        <div class="text-gray-400 text-xs mt-1">Confidence: ${(msg.confidence * 100).toFixed(0)}% · ${escapeHtml(msg.critique || 'Zero unsupported claims')}</div>
                     </div>`;
                 } else if (msg.type === 'terminal') {
                     const data = msg.data;
                     if (data.terminal_status === 'INSUFFICIENT_EVIDENCE') {
-                        verdictBox.innerHTML += `<div class="p-3 bg-yellow-950/40 border border-yellow-800 rounded text-yellow-300 font-bold">⚠ ABSTAINED: Inconclusive Telemetry. Refusing ungrounded hypothesis.</div>`;
+                        let checksHtml = '';
+                        if (data.next_discriminating_checks && data.next_discriminating_checks.length > 0) {
+                            checksHtml = `<div class="mt-2 text-xs font-normal text-yellow-200"><b>Next Discriminating Checks:</b><ul class="list-disc pl-4 mt-1">` +
+                                data.next_discriminating_checks.map(c => `<li>${escapeHtml(c)}</li>`).join('') + `</ul></div>`;
+                        }
+                        verdictBox.innerHTML += `<div class="p-3 bg-yellow-950/40 border border-yellow-800 rounded text-yellow-300 font-bold">⚠ ABSTAINED: Inconclusive Telemetry. Refusing ungrounded hypothesis.${checksHtml}</div>`;
                     } else {
+                        let runbookHtml = '';
+                        if (data.recommended_runbook_action) {
+                            runbookHtml = `<div class="mt-2 text-xs text-cyan-300 bg-cyan-950/40 p-2 rounded border border-cyan-800"><b>Recommended SRE Runbook Action:</b><br><code class="text-white">${escapeHtml(data.recommended_runbook_action)}</code></div>`;
+                        }
                         verdictBox.innerHTML += `<div class="p-3 bg-emerald-950/40 border border-emerald-800 rounded">
-                            <div class="text-emerald-300 font-bold">Terminal Status: ${data.terminal_status}</div>
-                            <div class="text-gray-300 text-xs mt-1">Blast Radius Score: <span class="text-yellow-400">${data.score.toFixed(2)}</span> (Impacts: ${data.callers.join(', ')})</div>
+                            <div class="text-emerald-300 font-bold">Terminal Status: ${escapeHtml(data.terminal_status)}</div>
+                            <div class="text-gray-300 text-xs mt-1">Blast Radius Score: <span class="text-yellow-400">${data.score.toFixed(2)}</span> (Impacts: ${escapeHtml(data.callers.join(', '))})</div>
+                            ${runbookHtml}
                         </div>`;
                         hitlPanel.classList.remove('hidden');
-                        document.getElementById('remediationText').innerText = data.remediation || 'Apply targeted service mitigation.';
+                        document.getElementById('remediationText').textContent = data.recommended_runbook_action || data.remediation || 'Apply targeted service mitigation.';
                     }
                     eventSource.close();
                 }

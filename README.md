@@ -4,9 +4,9 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-orange.svg)](https://github.com/langchain-ai/langgraph)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![DORA: Elite](https://img.shields.io/badge/DORA_Tier-Elite-brightgreen.svg)](#-dora-operational-impact)
+[![DORA Model: Elite Target](https://img.shields.io/badge/DORA_Model-Elite_Target-brightgreen.svg)](#-analytical-mttr-triage-acceleration-model)
 
-> **Sentinel-Ops** is an enterprise-grade autonomous Site Reliability Engineering (AI SRE) and Root Cause Analysis (RCA) platform. Built on **LangGraph**, **FastMCP telemetry standardization**, a containerized **Docker Compose microservices chaos sandbox**, and advanced GenAI capabilities: **Topology-Aware GraphRAG**, **CRAG sufficiency gating**, **Fresh-Context Adversarial Red-Teaming**, **Indirect Prompt-Injection Firewalls**, and **Direct Preference Optimization (DPO)** trajectory logging.
+> **Sentinel-Ops** is an open-source autonomous Site Reliability Engineering (AI SRE) investigation and triage assistant. Built on **LangGraph**, **FastMCP telemetry standardization**, a containerized **Docker Compose microservices chaos sandbox**, and advanced SRE capabilities: **Topology-Aware GraphRAG**, **CRAG sufficiency gating**, **Fresh-Context Adversarial Red-Teaming**, **Indirect Prompt-Injection Firewalls**, and **Safe Read-Only Advisory Triage Guidance**.
 
 ---
 
@@ -120,15 +120,17 @@ Sentinel-Ops is evaluated across 5 held-out incident cases against deterministic
 
 ---
 
-## ⚡ DORA Operational Impact
+## ⚡ Analytical MTTR Triage Acceleration Model
 
-| DORA Metric | Industry SRE Baseline | Sentinel-Ops Autonomous | Operational Impact |
+> **Methodology Notice:** The metrics below represent an **Analytical Triage Acceleration Model** contrasting industry-typical manual on-call runbook execution (45m baseline) against automated concurrent telemetry correlation. Production deployments require measuring real operator MTTR and recovery events.
+
+| Operational Dimension | Industry SRE Baseline | Sentinel-Ops Automated | Analytical Impact |
 | :--- | :--- | :--- | :--- |
 | **Mean Time to Detect (MTTD)** | 15 – 30 minutes | **5.0 seconds** | 99.4% Reduction |
-| **Mean Time to Remediate (MTTR)** | 45.0 minutes | **1.85 seconds** | **1460× Acceleration** |
+| **Mean Time to Triage (MTTR)** | 45.0 minutes (Manual Runbook) | **1.85 seconds** (Query) | **1460× Analytical Speedup** |
 | **Unsupported Claim Rate** | 33.3% (Single-pass LLM) | **0.0%** (Enforced Citations) | Zero Hallucinations |
 | **Correct Abstention Rate** | 0.0% (Hallucinates guess) | **100.0%** (CRAG Abstention) | Zero Ungrounded Fixes |
-| **DORA Performance Classification** | Medium / High | **ELITE TIER** | Top 5% of Tech Orgs |
+| **Target Performance Tier** | Medium / High | **ELITE TARGET** | Top 5% Operational Target |
 
 ---
 
@@ -145,7 +147,7 @@ Sentinel-Ops is evaluated across 5 held-out incident cases against deterministic
 ```
 Runs a complete live demonstration: checks Docker microservices sandbox, injects chaos fault, scrapes Prometheus telemetry, runs multi-agent RCA triage, generates DORA acceleration metrics, and cleanly recovers sandbox services.
 
-### 1. Run Complete Automated Test Suite (22 Tests)
+### 1. Run Complete Automated Test Suite (31 Tests)
 ```bash
 cd sentinel-ops
 uv run pytest
@@ -157,9 +159,16 @@ cd sentinel-ops
 uv run python -m benchmarks.runner
 ```
 
+CI also runs a seeded incident decision gate. Reproduce a run locally with
+`uv run --extra dev python -m benchmarks.challenge_gate --seed 20261124` from
+`sentinel-ops/`. [Challenge protocol and private holdout instructions](sentinel-ops/benchmarks/README.md)
+
 ### 3. Interactive Terminal CLI Triage
 ```bash
 cd sentinel-ops
+# Live Telemetry Investigation against Docker Sandbox
+uv run python -m sentinel_ops.cli --live --target-service checkout-service
+
 # Triage Case 01 (Payment DB Connection Exhaustion)
 uv run python -m sentinel_ops.cli --case-id case_01
 

@@ -11,6 +11,7 @@ from benchmarks.baselines.deterministic_rules import DeterministicRuleBaseline
 from benchmarks.baselines.single_pass_llm import SinglePassLLMBaseline
 from sentinel_ops.agents.graph import compile_investigation_graph
 from sentinel_ops.agents.state import AtomicClaim, EvidenceItem
+from sentinel_ops.memory.graph_rag import TopologyGraphRAG
 from tests.test_claim_verification import validate_claims_and_citations
 
 console = Console()
@@ -25,13 +26,26 @@ class SentinelOpsLangGraphAgent:
 
     def __init__(self):
         self.graph = compile_investigation_graph()
+        self.rag = TopologyGraphRAG()
 
     def diagnose(self, case: Dict[str, Any], resume_thread_id: str | None = None) -> Dict[str, Any]:
+        matches = self.rag.retrieve(
+            alert_text=case.get("alert_text", ""),
+            target_service=case.get("target_service", "checkout-service"),
+            incident_timestamp=case.get("incident_timestamp", "2026-11-24T14:32:00Z"),
+            top_k=2,
+        )
+        rag_context = [
+            {"incident_id": m["postmortem"].incident_id, "title": m["postmortem"].title, "service": m["postmortem"].root_cause_service}
+            for m in matches
+        ]
         initial_state = {
             "incident_id": case["id"],
             "alert_text": case.get("alert_text", ""),
             "incident_timestamp": case.get("incident_timestamp", "2026-11-24T14:32:00Z"),
             "target_service": case.get("target_service", "checkout-service"),
+            "trace_id": case.get("trace_id"),
+            "historical_context": rag_context,
             "simulated_telemetry": case.get("mock_telemetry"),
             "crag_iterations": 0,
         }
@@ -52,6 +66,7 @@ class SentinelOpsLangGraphAgent:
         return {
             "agent": "sentinel_ops_langgraph",
             "diagnosed_root_cause": diag_svc,
+            "mechanism": final_state.get("mechanism"),
             "terminal_status": final_state.get("terminal_status"),
             "terminal_reason": final_state.get("terminal_reason"),
             "claims": final_state.get("structured_claims", []),

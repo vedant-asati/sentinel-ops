@@ -198,3 +198,108 @@ def test_capacity_occupancy_distinction():
     assert status == "SUCCESS"
     assert "saturated" in finding
     assert "100% capacity exhausted" in finding
+
+
+def test_evidence_reducer_retry_upgrade():
+    """P1 Probe: Evidence reducer must upgrade a failed/empty observation when a retry succeeds."""
+    from sentinel_ops.agents.state import EvidenceItem, merge_evidence_items
+
+    existing = [
+        EvidenceItem(
+            id="EV-prom-paym-db_p",
+            backend_source="prometheus",
+            query_string="query",
+            query_params={"service": "payment-service"},
+            observation_window=("2026-11-24T14:30:00Z", "2026-11-24T14:35:00Z"),
+            sample_or_span_ref="db_pool_active",
+            finding="Query failed: 503 Service Unavailable",
+            raw_payload="",
+            status="TOOL_FAILURE",
+        )
+    ]
+    retry_incoming = [
+        EvidenceItem(
+            id="EV-prom-paym-db_p",
+            backend_source="prometheus",
+            query_string="query",
+            query_params={"service": "payment-service"},
+            observation_window=("2026-11-24T14:30:00Z", "2026-11-24T14:35:00Z"),
+            sample_or_span_ref="db_pool_active",
+            finding="payment_db_pool_active saturated at 2.0 / 2.0 (100% capacity exhausted)",
+            raw_payload="[[1795530720, '2.0']]",
+            status="SUCCESS",
+        )
+    ]
+    merged = merge_evidence_items(existing, retry_incoming)
+    assert len(merged) == 1
+    assert merged[0].status == "SUCCESS"
+    assert "saturated" in merged[0].finding
+
+
+def test_adversarial_semantic_service_mismatch_rejection():
+    """P0 Probe: Adversarial reviewer rejects claims that cite evidence from unrelated services."""
+    from sentinel_ops.agents.adversarial import adversarial_reviewer_node
+    from sentinel_ops.agents.state import AtomicClaim, EvidenceItem, InvestigationState
+
+    cart_evidence = EvidenceItem(
+        id="EV-prom-cart-memo",
+        backend_source="prometheus",
+        query_string="cart_memory",
+        query_params={"service": "cart-service"},
+        observation_window=("2026-11-24T14:30:00Z", "2026-11-24T14:35:00Z"),
+        sample_or_span_ref="memory_usage",
+        finding="cart-service memory_usage critically exhausted at 95%",
+        raw_payload="",
+        status="SUCCESS",
+    )
+    # Fraudulent claim: claims payment-service root cause but cites cart-service evidence!
+    bad_claim_1 = AtomicClaim(
+        claim_id="CL-001",
+        statement="payment-service database connection pool exhaustion is root cause",
+        claim_type="root_cause",
+        cited_evidence_ids=["EV-prom-cart-memo"],
+    )
+    bad_claim_2 = AtomicClaim(
+        claim_id="CL-002",
+        statement="payment-service pool saturated",
+        claim_type="mechanism",
+        cited_evidence_ids=["EV-prom-cart-memo"],
+    )
+    state = InvestigationState(
+        incident_id="fraud_test",
+        alert_text="test alert",
+        incident_timestamp="2026-11-24T14:32:00Z",
+        target_service="checkout-service",
+        evidence=[cart_evidence],
+        structured_claims=[bad_claim_1, bad_claim_2],
+    )
+    res = adversarial_reviewer_node(state)
+    verdict = res["adversarial_verdict"]
+    assert verdict.all_claims_supported is False
+    assert any("does not relate to payment-service" in str(ev["reason"]) for ev in verdict.claim_evaluations)
+
+
+@pytest.mark.asyncio
+async def test_deadline_expiration_routes_to_operational_failure():
+    """P1 Probe: When shared deadline budget is expired, graph immediately aborts with OPERATIONAL_FAILURE."""
+    import time
+    from sentinel_ops.agents.graph import compile_investigation_graph
+
+    graph = compile_investigation_graph()
+    initial_state = {
+        "incident_id": "test_deadline_expired",
+        "alert_text": "checkout-service outage",
+        "incident_timestamp": "2026-11-24T14:32:00Z",
+        "target_service": "checkout-service",
+        "deadline_timestamp": time.monotonic() - 1.0,  # Already expired in the past!
+        "simulated_telemetry": {
+            "prometheus": {
+                "payment-service": {"db_pool_active": {"status": "SUCCESS", "values": [[1795530720, "2.0"]]}}
+            },
+            "tempo": {},
+        },
+    }
+    config = {"configurable": {"thread_id": "test_deadline_thread"}}
+    res = await graph.ainvoke(initial_state, config=config)
+    assert res["terminal_status"] == "OPERATIONAL_FAILURE"
+    assert "deadline" in res["terminal_reason"].lower()

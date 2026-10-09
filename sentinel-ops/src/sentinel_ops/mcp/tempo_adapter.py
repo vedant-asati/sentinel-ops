@@ -102,7 +102,7 @@ class TempoAdapter:
                     "bottleneck_duration_ms": max_exclusive,
                     "formatted": formatted,
                 }
-            except httpx.HTTPError as e:
+            except (httpx.HTTPError, json.JSONDecodeError, ValueError, Exception) as e:
                 return {
                     "status": "TOOL_FAILURE",
                     "trace_id": trace_id,

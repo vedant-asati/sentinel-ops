@@ -18,17 +18,36 @@ class EvidenceItem(BaseModel):
     )
 
 
+STATUS_PRIORITY = {
+    "SUCCESS": 3,
+    "TOOL_FAILURE": 2,
+    "EMPTY": 1,
+}
+
+
+def _evidence_sort_key(item: EvidenceItem):
+    """Deterministic, symmetric sort key for commutativity and tie-breaking."""
+    prio = STATUS_PRIORITY.get(item.status, 0)
+    return (prio, len(item.finding or ""), item.finding or "", item.raw_payload or "")
+
+
 def merge_evidence_items(
     existing: List[EvidenceItem], incoming: List[EvidenceItem]
 ) -> List[EvidenceItem]:
-    """LangGraph reducer: merges and deduplicates concurrent evidence by stable ID."""
-    seen_ids = {item.id for item in existing}
-    merged = list(existing)
-    for item in incoming:
-        if item.id not in seen_ids:
-            merged.append(item)
-            seen_ids.add(item.id)
-    return merged
+    """LangGraph reducer: merges and deduplicates concurrent evidence by stable ID.
+    Strictly commutative and associative: merge(A, B) == merge(B, A).
+    Priority order: SUCCESS > TOOL_FAILURE > EMPTY.
+    """
+    items_by_id: Dict[str, EvidenceItem] = {}
+    for item in list(existing) + list(incoming):
+        if item.id not in items_by_id:
+            items_by_id[item.id] = item
+        else:
+            prev = items_by_id[item.id]
+            if _evidence_sort_key(item) > _evidence_sort_key(prev):
+                items_by_id[item.id] = item
+
+    return sorted(items_by_id.values(), key=lambda x: x.id)
 
 
 class AtomicClaim(BaseModel):
@@ -58,7 +77,12 @@ class InvestigationState(BaseModel):
     alert_text: str
     incident_timestamp: str = Field(description="ISO-8601 anchor timestamp T_incident")
     target_service: str = Field(description="Primary reporting service (e.g. checkout-service)")
+    trace_id: Optional[str] = Field(default=None, description="Specific target trace ID if alerted")
     hypotheses: List[str] = Field(default_factory=list)
+    historical_context: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Top-k matching postmortems retrieved by GraphRAG"
+    )
     
     # Concurrent evidence ledger with deterministic reducer
     evidence: Annotated[List[EvidenceItem], merge_evidence_items] = Field(default_factory=list)
@@ -68,10 +92,15 @@ class InvestigationState(BaseModel):
     crag_sufficient: bool = False
     missing_evidence_hints: List[str] = Field(default_factory=list)
     simulated_telemetry: Optional[Dict[str, Any]] = None
+    deadline_timestamp: Optional[float] = Field(
+        default=None,
+        description="Monotonic timestamp after which the run must abort as OPERATIONAL_FAILURE"
+    )
     
     # Diagnosis & Claims
     structured_claims: List[AtomicClaim] = Field(default_factory=list)
     root_cause_summary: Optional[str] = None
+    mechanism: Optional[str] = Field(default=None, description="Validated root-cause mechanism identifier")
     adversarial_verdict: Optional[AdversarialVerdict] = None
     adversarial_iterations: int = 0
     
@@ -79,6 +108,14 @@ class InvestigationState(BaseModel):
     affected_callers: List[str] = Field(default_factory=list)
     blast_radius_score: Optional[float] = None
     remediation_proposal: Optional[str] = None
+    next_discriminating_checks: List[str] = Field(
+        default_factory=list,
+        description="Actionable next telemetry checks for operator when evidence is inconclusive or missing"
+    )
+    recommended_runbook_action: Optional[str] = Field(
+        default=None,
+        description="Read-only advisory command for operator (e.g., kubectl or helm)"
+    )
     
     # Terminal State
     terminal_status: Optional[Literal[

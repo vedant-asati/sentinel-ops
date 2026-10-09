@@ -56,10 +56,8 @@ def blast_radius_node(state: Any) -> Dict[str, Any]:
             # Derive action from mechanism
             if "database connection pool" in stmt or "db_pool" in stmt:
                 action = "db_pool_resize"
-            elif "config" in stmt or "drift" in stmt:
+            elif "config" in stmt or "drift" in stmt or "connection failure" in stmt or "refusal" in stmt:
                 action = "config_reload"
-            elif "connection failure" in stmt or "refusal" in stmt:
-                action = "restart"
             elif "memory" in stmt or "oom" in stmt or "cpu" in stmt:
                 action = "restart"
             break

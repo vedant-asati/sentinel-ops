@@ -27,22 +27,34 @@ jobs:
       - name: Install Dependencies
         run: |
           cd sentinel-ops
-          uv sync
+          uv sync --extra dev
 
-      - name: Run Unit Tests (22 Tests)
+      - name: Run unit and evaluator calibration tests
         run: |
           cd sentinel-ops
-          uv run pytest -v
+          uv run --extra dev python -m pytest -v
 
-      - name: Run 3-Case Benchmark Replay Matrix
+      - name: Run fixture replay matrix
         run: |
           cd sentinel-ops
-          uv run python -m benchmarks.runner
+          uv run --extra dev python -m benchmarks.runner
 
       - name: Run DORA Metrics Analytics Report
         run: |
           cd sentinel-ops
           uv run python -m sentinel_ops.analytics.dora
+
+      - name: Gate incident diagnoses on fresh counterfactual cases
+        working-directory: sentinel-ops
+        run: uv run --extra dev python -m benchmarks.challenge_gate --report challenge-results.json
+
+      - name: Save challenge results and replay seed
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incident-challenge-results
+          path: sentinel-ops/challenge-results.json
+          if-no-files-found: warn
 
   docker-sandbox-validation:
     runs-on: ubuntu-latest

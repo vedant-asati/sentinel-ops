@@ -57,9 +57,9 @@ else
 fi
 echo ""
 
-# Step 4: Run Sentinel-Ops Investigation Triage
-echo -e "${YELLOW}[Step 4/6] Executing Sentinel-Ops Multi-Agent LangGraph Triage (Case 01)...${NC}"
-uv run sentinel-ops --case-id case_01 --auto-approve
+# Step 4: Run Sentinel-Ops Investigation Triage (Live Telemetry Probing)
+echo -e "${YELLOW}[Step 4/6] Executing Sentinel-Ops Multi-Agent LangGraph Triage against Live Prometheus...${NC}"
+uv run sentinel-ops --live --target-service checkout-service --auto-approve
 echo ""
 
 # Step 5: DORA Operational Impact Report

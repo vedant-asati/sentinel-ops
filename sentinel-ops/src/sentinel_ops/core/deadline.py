@@ -38,6 +38,13 @@ class DeadlineTracker:
             )
 
     def bounded_timeout(self, desired_timeout: float) -> float:
-        """Caps a desired timeout by the remaining total budget."""
-        rem = self.remaining
-        return min(desired_timeout, rem)
+        """Caps a desired timeout by the remaining total budget.
+        Raises RunDeadlineExceeded if the deadline is already expired.
+        Guarantees a strictly positive timeout for active sockets.
+        """
+        if self.is_expired() or self.remaining <= 0.0:
+            raise RunDeadlineExceeded(
+                f"Investigation deadline of {self.deadline_seconds}s exceeded before socket operation "
+                f"(elapsed: {self.elapsed:.2f}s)"
+            )
+        return max(0.001, min(desired_timeout, self.remaining))

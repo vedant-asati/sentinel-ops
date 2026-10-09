@@ -7,11 +7,13 @@ from sentinel_ops.security.sanitizer import wrap_telemetry
 ALLOWED_SERVICES = ("checkout-service", "cart-service", "pricing-service", "payment-service")
 
 METRIC_QUERY_TEMPLATES = {
-    "error_rate": 'sum(rate(http_requests_total{{service="{service}",status=~"5.."}}[2m])) / sum(rate(http_requests_total{{service="{service}"}}[2m]))',
-    "latency_p95": 'histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{{service="{service}"}}[2m])) by (le))',
+    "error_rate": 'payment_error_rate{{service="{service}"}}',
+    "latency_p95": 'http_request_duration_seconds_bucket{{service="{service}",le="0.95"}}',
     "db_pool_active": 'payment_db_pool_active{{service="{service}"}}',
     "db_pool_size": 'payment_db_pool_size{{service="{service}"}}',
-    "cpu_saturation": 'sum(rate(container_cpu_usage_seconds_total{{container="{service}"}}[2m]))',
+    "cpu_saturation": 'container_cpu_usage_seconds_total{{container="{service}"}}',
+    "memory_usage": 'container_memory_usage_ratio{{container="{service}"}}',
+    "container_restarts": 'container_restart_count{{container="{service}"}}',
 }
 
 
@@ -56,6 +58,18 @@ class PrometheusAdapter:
                     f"{self.base_url}/api/v1/query_range",
                     params={"query": promql, "start": start_iso, "end": end_iso, "step": step},
                 )
+                if resp.status_code == 200:
+                    try:
+                        resp_json = resp.json()
+                        if not resp_json.get("data", {}).get("result"):
+                            # Fallback to instant query if range was too narrow or zero samples in window
+                            resp = await client.get(
+                                f"{self.base_url}/api/v1/query",
+                                params={"query": promql},
+                            )
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+
                 resp.raise_for_status()
                 try:
                     data = resp.json().get("data", {}).get("result", [])
@@ -83,7 +97,7 @@ class PrometheusAdapter:
                     "series_count": len(capped_data),
                     "formatted": formatted
                 }
-            except httpx.HTTPError as e:
+            except (httpx.HTTPError, json.JSONDecodeError, ValueError, Exception) as e:
                 return {
                     "status": "TOOL_FAILURE",
                     "promql": promql,

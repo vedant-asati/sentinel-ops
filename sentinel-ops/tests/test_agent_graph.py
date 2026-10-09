@@ -19,6 +19,7 @@ async def test_case_01_payment_db_pool_investigation():
         "alert_text": "checkout-service p95 latency spike",
         "incident_timestamp": "2026-11-24T14:32:00Z",
         "target_service": "checkout-service",
+        "simulated_telemetry": {"prometheus": {}, "tempo": {}},
         "evidence": [
             EvidenceItem(
                 id="EV-prom-paym-db_p",
@@ -65,6 +66,7 @@ async def test_case_02_pricing_latency_investigation():
         "alert_text": "checkout-service p95 latency spike",
         "incident_timestamp": "2026-11-24T15:10:00Z",
         "target_service": "checkout-service",
+        "simulated_telemetry": {"prometheus": {}, "tempo": {}},
         "evidence": [
             EvidenceItem(
                 id="EV-prom-paym-db_p",
@@ -111,6 +113,12 @@ async def test_case_03_abstention_on_withheld_evidence():
         "incident_timestamp": "2026-11-24T16:00:00Z",
         "target_service": "checkout-service",
         "crag_iterations": 2,  # Max retries exhausted
+        "simulated_telemetry": {
+            "prometheus": {
+                "payment-service": {"db_pool_active": {"status": "EMPTY"}},
+            },
+            "tempo": {},
+        },
         "evidence": [
             EvidenceItem(
                 id="EV-prom-paym-db_p",
