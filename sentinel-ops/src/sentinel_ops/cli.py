@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import sys
+import uuid
 import yaml
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -98,9 +99,9 @@ def run_triage(
             "incident_timestamp": incident_timestamp,
             "target_service": target_service,
             "simulated_telemetry": mock_telemetry,
-            "crag_iterations": 2 if incident_id == "case_03" else 0,
+            "crag_iterations": 0,
         }
-        config = {"configurable": {"thread_id": f"cli_{incident_id}"}}
+        config = {"configurable": {"thread_id": f"cli_{incident_id}_{uuid.uuid4().hex[:8]}"}}
         final_state = asyncio.run(graph.ainvoke(initial_state, config=config))
 
     terminal_status = final_state.get("terminal_status", "OPERATIONAL_FAILURE")

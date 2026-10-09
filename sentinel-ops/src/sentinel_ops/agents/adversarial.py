@@ -49,8 +49,12 @@ def adversarial_reviewer_node(state: InvestigationState) -> Dict[str, Any]:
         for eid in c.cited_evidence_ids:
             if eid not in evidence_map:
                 invalid_citations.append(f"Unknown ID {eid}")
-            elif evidence_map[eid].status != "SUCCESS":
-                invalid_citations.append(f"{eid} has non-SUCCESS status '{evidence_map[eid].status}'")
+            else:
+                ev_item = evidence_map[eid]
+                if ev_item.status != "SUCCESS":
+                    invalid_citations.append(f"{eid} has non-SUCCESS status '{ev_item.status}'")
+                elif "nan" in ev_item.finding.lower():
+                    invalid_citations.append(f"{eid} contains non-finite/NaN measurement ('{ev_item.finding}')")
 
         if invalid_citations:
             claim_evals.append({
@@ -67,9 +71,13 @@ def adversarial_reviewer_node(state: InvestigationState) -> Dict[str, Any]:
             })
 
     critique = None if all_supported else "One or more claims cite inconclusive or failed evidence."
+    supported_count = sum(1 for ev in claim_evals if ev["supported"])
+    total_claims = len(claim_evals)
+    calculated_confidence = round(supported_count / total_claims, 2) if total_claims > 0 else 0.0
+
     verdict = AdversarialVerdict(
         all_claims_supported=all_supported,
-        confidence=0.95 if all_supported else 0.10,
+        confidence=calculated_confidence if all_supported else 0.10,
         claim_evaluations=claim_evals,
         critique_hint=critique,
     )

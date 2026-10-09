@@ -1,49 +1,66 @@
 id: case_04
 title: Cart Service Unbounded Session Memory Leak (OOMKilled)
-alert_text: >
-  Alert: checkout-service experiencing cart validation failures and 502 Bad Gateway
-  errors communicating with cart-service starting at 17:15:00Z.
-incident_timestamp: "2026-11-24T17:15:00Z"
+alert_text: 'Alert: checkout-service experiencing cart validation failures and 502
+  Bad Gateway errors communicating with cart-service starting at 17:15:00Z.
+
+  '
+incident_timestamp: '2026-11-24T17:15:00Z'
 target_service: checkout-service
 candidate_hypotheses:
-  - "Hypothesis A: cart-service session cache memory leak causing container OOMKill"
-  - "Hypothesis B: payment-service database connection pool exhaustion"
+- 'Hypothesis A: cart-service session cache memory leak causing container OOMKill'
+- 'Hypothesis B: payment-service database connection pool exhaustion'
 ground_truth:
   root_cause_service: cart-service
   mechanism: memory_leak_oomkill
-  description: >
-    Cart service session cache grew unbounded without TTL eviction, causing
+  description: 'Cart service session cache grew unbounded without TTL eviction, causing
     Linux cgroup memory exhaustion and container OOMKill (Exit 137).
+
+    '
   expected_terminal_status: SUPPORTED_DIAGNOSIS
   distinguishing_signals:
-    - backend: prometheus
-      service: cart-service
-      metric_type: memory_usage
-      expected_value: 0.99
-    - backend: tempo
-      service: cart-service
-      bottleneck_service: cart-service
-  falsified_hypothesis: "Hypothesis B (payment-service DB pool is healthy with 1 active connection)"
+  - backend: prometheus
+    service: cart-service
+    metric_type: memory_usage
+    expected_value: 0.99
+  - backend: tempo
+    service: cart-service
+    bottleneck_service: cart-service
+  falsified_hypothesis: Hypothesis B (payment-service DB pool is healthy with 1 active
+    connection)
 mock_telemetry:
   prometheus:
     cart-service:
       memory_usage:
         status: SUCCESS
-        values: [[1732468500, "0.98"], [1732468515, "0.99"]]
+        values:
+        - - 1795540500
+          - '0.98'
+        - - 1795540515
+          - '0.99'
       container_restarts:
         status: SUCCESS
-        values: [[1732468500, "1.0"], [1732468515, "3.0"]]
+        values:
+        - - 1795540500
+          - '1.0'
+        - - 1795540515
+          - '3.0'
       error_rate:
         status: SUCCESS
-        values: [[1732468500, "0.45"]]
+        values:
+        - - 1795540500
+          - '0.45'
     payment-service:
       db_pool_active:
         status: SUCCESS
-        values: [[1732468500, "1.0"]]
+        values:
+        - - 1795540500
+          - '1.0'
     pricing-service:
       latency_p95:
         status: SUCCESS
-        values: [[1732468500, "0.022"]]
+        values:
+        - - 1795540500
+          - '0.022'
   tempo:
     trace_chk_04:
       status: SUCCESS

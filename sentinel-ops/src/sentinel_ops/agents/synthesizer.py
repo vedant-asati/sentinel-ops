@@ -22,9 +22,16 @@ def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
     payment_evidence = next((e for e in successful_items.values() if is_payment(e) and "saturated" in e.finding), None)
     pricing_metric_ev = next((e for e in successful_items.values() if is_pricing(e) and "spiked" in e.finding), None)
     pricing_trace_ev = next((e for e in successful_items.values() if e.backend_source == "tempo" and "pricing-service" in e.finding and "bottleneck" in e.finding), None)
-    pricing_normal_ev = next((e for e in successful_items.values() if is_pricing(e) and ("normal" in e.finding or "healthy" in e.finding)), None)
-    cart_ev = next((e for e in successful_items.values() if "cart" in e.id and ("exhausted" in e.finding or "bottleneck in cart" in e.finding)), None)
-    payment_error_ev = next((e for e in successful_items.values() if is_payment(e) and "error_rate spiked" in e.finding), None)
+    pricing_normal_ev = next((e for e in successful_items.values() if is_pricing(e) and ("normal" in e.finding or "healthy" in e.finding) and "nan" not in e.finding.lower()), None)
+    
+    # Cart evidence: memory + restart/trace
+    cart_mem_ev = next((e for e in successful_items.values() if "cart" in e.id and "memory" in e.query_string and "exhausted" in e.finding), None)
+    cart_restart_ev = next((e for e in successful_items.values() if "cart" in e.id and "restarts" in e.query_string and "elevated" in e.finding), None)
+    cart_trace_ev = next((e for e in successful_items.values() if e.backend_source == "tempo" and "cart" in e.finding and "bottleneck" in e.finding), None)
+    
+    # Payment error evidence
+    payment_error_ev = next((e for e in successful_items.values() if is_payment(e) and "error_rate" in e.query_string and "spiked" in e.finding), None)
+    payment_trace_ev = next((e for e in successful_items.values() if e.backend_source == "tempo" and "payment" in e.finding and "bottleneck" in e.finding), None)
 
     claims: List[AtomicClaim] = []
 
@@ -56,32 +63,44 @@ def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
             )
         summary = "Root cause identified as payment-service database connection pool exhaustion."
 
-    elif cart_ev:
+    elif cart_mem_ev and (cart_restart_ev or cart_trace_ev):
+        cited_ids = [cart_mem_ev.id]
+        mech_parts = [cart_mem_ev.finding]
+        if cart_restart_ev:
+            cited_ids.append(cart_restart_ev.id)
+            mech_parts.append(cart_restart_ev.finding)
+        if cart_trace_ev:
+            cited_ids.append(cart_trace_ev.id)
+            mech_parts.append(cart_trace_ev.finding)
+
         claims.append(
             AtomicClaim(
                 claim_id="CL-001",
-                statement="cart-service memory exhaustion and container OOMKill is the root cause of cart validation errors.",
+                statement="cart-service memory exhaustion and container restarts (OOMKill) is the root cause of cart validation errors.",
                 claim_type="root_cause",
-                cited_evidence_ids=[cart_ev.id],
+                cited_evidence_ids=cited_ids,
             )
         )
         claims.append(
             AtomicClaim(
                 claim_id="CL-002",
-                statement=cart_ev.finding,
+                statement="; ".join(mech_parts),
                 claim_type="mechanism",
-                cited_evidence_ids=[cart_ev.id],
+                cited_evidence_ids=cited_ids,
             )
         )
         summary = "Root cause identified as cart-service session cache memory leak and container OOMKill."
 
-    elif payment_error_ev:
+    elif payment_error_ev and (payment_trace_ev or any("refused" in e.finding.lower() for e in successful_items.values())):
+        cited_ids = [payment_error_ev.id]
+        if payment_trace_ev:
+            cited_ids.append(payment_trace_ev.id)
         claims.append(
             AtomicClaim(
                 claim_id="CL-001",
-                statement="payment-service gateway endpoint configuration drift is causing connection refusal.",
+                statement="payment-service endpoint connection failure and elevated error rate is the root cause of order placement failures.",
                 claim_type="root_cause",
-                cited_evidence_ids=[payment_error_ev.id],
+                cited_evidence_ids=cited_ids,
             )
         )
         claims.append(
@@ -89,10 +108,10 @@ def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
                 claim_id="CL-002",
                 statement=payment_error_ev.finding,
                 claim_type="mechanism",
-                cited_evidence_ids=[payment_error_ev.id],
+                cited_evidence_ids=cited_ids,
             )
         )
-        summary = "Root cause identified as payment-service gateway configuration drift and connection refusal."
+        summary = "Root cause identified as payment-service connection failure and endpoint refusal."
 
     elif pricing_trace_ev or pricing_metric_ev:
         primary_ev = pricing_trace_ev or pricing_metric_ev
@@ -113,8 +132,7 @@ def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
                 cited_evidence_ids=[primary_ev.id],
             )
         )
-        # Check if we have payment evidence showing healthy state to cite as falsification
-        healthy_payment = next((e for e in successful_items.values() if is_payment(e) and ("normal" in e.finding or "healthy" in e.finding)), None)
+        healthy_payment = next((e for e in successful_items.values() if is_payment(e) and ("normal" in e.finding or "healthy" in e.finding) and "nan" not in e.finding.lower()), None)
         if healthy_payment:
             claims.append(
                 AtomicClaim(
@@ -127,7 +145,6 @@ def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
         summary = "Root cause identified as pricing-service algorithmic calculation latency."
 
     else:
-        # Fallback if no specific condition matched (should be caught by CRAG, but safety first)
         summary = "Inconclusive telemetry signals observed."
 
     return {

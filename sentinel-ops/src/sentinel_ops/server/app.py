@@ -1,5 +1,6 @@
 import asyncio
 import json
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import yaml
@@ -86,9 +87,9 @@ async def stream_triage(case_id: str):
             "incident_timestamp": fixture["incident_timestamp"],
             "target_service": fixture["target_service"],
             "simulated_telemetry": fixture.get("mock_telemetry"),
-            "crag_iterations": 2 if case_id == "case_03" else 0,
+            "crag_iterations": 0,
         }
-        config = {"configurable": {"thread_id": f"sse_{case_id}"}}
+        config = {"configurable": {"thread_id": f"sse_{case_id}_{uuid.uuid4().hex[:8]}"}}
         final_state = await graph.ainvoke(initial_state, config=config)
 
         # 3. Emit Evidence Items

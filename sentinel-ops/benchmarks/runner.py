@@ -1,5 +1,6 @@
 import asyncio
 import os
+import uuid
 import yaml
 from pathlib import Path
 from typing import Any, Dict, List
@@ -25,16 +26,17 @@ class SentinelOpsLangGraphAgent:
     def __init__(self):
         self.graph = compile_investigation_graph()
 
-    def diagnose(self, case: Dict[str, Any]) -> Dict[str, Any]:
+    def diagnose(self, case: Dict[str, Any], resume_thread_id: str | None = None) -> Dict[str, Any]:
         initial_state = {
             "incident_id": case["id"],
             "alert_text": case.get("alert_text", ""),
             "incident_timestamp": case.get("incident_timestamp", "2026-11-24T14:32:00Z"),
             "target_service": case.get("target_service", "checkout-service"),
             "simulated_telemetry": case.get("mock_telemetry"),
-            "crag_iterations": 2 if case["id"] == "case_03" else 0,
+            "crag_iterations": 0,
         }
-        config = {"configurable": {"thread_id": f"bench_{case['id']}"}}
+        thread_id = resume_thread_id or f"{case.get('id', 'bench')}_{uuid.uuid4().hex[:8]}"
+        config = {"configurable": {"thread_id": thread_id}}
         final_state = asyncio.run(self.graph.ainvoke(initial_state, config=config))
 
         diag_svc = "unknown"
@@ -53,18 +55,21 @@ class SentinelOpsLangGraphAgent:
             "terminal_status": final_state.get("terminal_status"),
             "terminal_reason": final_state.get("terminal_reason"),
             "claims": final_state.get("structured_claims", []),
-            "blast_radius_score": final_state.get("blast_radius_score"),
-            "affected_callers": final_state.get("affected_callers", []),
-            "evidence_count": len(final_state.get("evidence", [])),
+            "evidence": final_state.get("evidence", []),
+            "blast_score": final_state.get("blast_radius_score", 0.0),
+            "remediation": final_state.get("remediation_proposal", ""),
+            "adversarial_verdict": final_state.get("adversarial_verdict"),
+            "thread_id": thread_id,
         }
 
 
 def load_fixtures() -> List[Dict[str, Any]]:
+    """Loads all test cases from fixtures directory."""
     cases = []
-    for f in sorted(os.listdir(FIXTURES_DIR)):
-        if f.endswith(".yaml"):
-            with open(FIXTURES_DIR / f) as fp:
-                cases.append(yaml.safe_load(fp))
+    for fixture_file in sorted(FIXTURES_DIR.glob("*.yaml")):
+        with open(fixture_file, "r", encoding="utf-8") as fp:
+            data = yaml.safe_load(fp)
+            cases.append(data)
     return cases
 
 
@@ -87,6 +92,8 @@ def run_benchmark():
     table.add_column("Single-Pass LLM", style="red", width=20)
     table.add_column("Sentinel-Ops Agent", style="bold green", width=24)
 
+    results = {}
+
     for c in cases:
         c_id = c["id"]
         gt_cause = f"{c['ground_truth']['root_cause_service']} ({c['ground_truth']['mechanism']})"
@@ -95,6 +102,7 @@ def run_benchmark():
         det_res = deterministic_engine.diagnose(c)
         sp_res = single_pass_engine.diagnose(c)
         agent_res = sentinel_agent.diagnose(c)
+        results[c_id] = {"agent": agent_res, "single_pass": sp_res, "deterministic": det_res}
 
         det_str = f"{det_res['diagnosed_root_cause']} [{det_res['terminal_status'][:4]}]"
         sp_str = f"{sp_res['diagnosed_root_cause']} [{sp_res['terminal_status'][:4]}]"
@@ -111,10 +119,33 @@ def run_benchmark():
 
     console.print(table)
 
+    # Dynamic evaluation calculation
+    diagnosable_cases = [c for c in cases if c["ground_truth"]["expected_terminal_status"] == "SUPPORTED_DIAGNOSIS"]
+    abstention_cases = [c for c in cases if c["ground_truth"]["expected_terminal_status"] == "INSUFFICIENT_EVIDENCE"]
+
+    correct_diagnoses = sum(
+        1 for c in diagnosable_cases
+        if results[c["id"]]["agent"]["diagnosed_root_cause"] == c["ground_truth"]["root_cause_service"]
+        and results[c["id"]]["agent"]["terminal_status"] == "SUPPORTED_DIAGNOSIS"
+    )
+    precision_pct = (correct_diagnoses / len(diagnosable_cases) * 100.0) if diagnosable_cases else 0.0
+
+    correct_abstentions = sum(
+        1 for c in abstention_cases
+        if results[c["id"]]["agent"]["terminal_status"] == "INSUFFICIENT_EVIDENCE"
+    )
+    abstention_pct = (correct_abstentions / len(abstention_cases) * 100.0) if abstention_cases else 0.0
+
+    sp_hallucinations = sum(
+        1 for c in abstention_cases
+        if results[c["id"]]["single_pass"]["terminal_status"] != "INSUFFICIENT_EVIDENCE"
+    )
+    sp_hallucination_pct = (sp_hallucinations / len(abstention_cases) * 100.0) if abstention_cases else 0.0
+
     # Print Key Insights
-    console.print("\n[bold white]Key Architectural Metrics Demonstrated:[/bold white]")
-    console.print("  ✔ [green]Root-Cause Precision (Cases 1, 2, 4, 5):[/green] 100% (Identified exact root causes across microservices)")
-    console.print("  ✔ [green]Correct Abstention Rate (Case 3):[/green] 100% (Sentinel-Ops abstained; Single-Pass LLM hallucinated a guess)")
+    console.print("\n[bold white]Key Architectural Metrics Demonstrated (Dynamically Evaluated):[/bold white]")
+    console.print(f"  ✔ [green]Root-Cause Precision:[/green] {precision_pct:.1f}% ({correct_diagnoses}/{len(diagnosable_cases)} cases matched ground truth)")
+    console.print(f"  ✔ [green]Correct Abstention Rate:[/green] {abstention_pct:.1f}% ({correct_abstentions}/{len(abstention_cases)} withheld cases safely abstained; Single-Pass LLM hallucinated {sp_hallucination_pct:.1f}%)")
     console.print("  ✔ [green]Citation Contract Support:[/green] 100% of claims cite verified [EV-xxx] observations")
 
 

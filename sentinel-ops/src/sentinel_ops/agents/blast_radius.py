@@ -40,23 +40,34 @@ def calculate_reverse_blast_radius(target_service: str, action: str = "restart")
 
 def blast_radius_node(state: Any) -> Dict[str, Any]:
     """Calculates upstream blast radius for the diagnosed root cause service."""
-    # Find diagnosed root cause service from claims
     root_cause_service = "checkout-service"
+    action = "restart"
+
     for claim in state.structured_claims:
         if claim.claim_type == "root_cause":
-            if "payment-service" in claim.statement:
+            stmt = claim.statement.lower()
+            if "payment-service" in stmt:
                 root_cause_service = "payment-service"
-            elif "pricing-service" in claim.statement:
+            elif "pricing-service" in stmt:
                 root_cause_service = "pricing-service"
-            elif "cart-service" in claim.statement:
+            elif "cart-service" in stmt:
                 root_cause_service = "cart-service"
+
+            # Derive action from mechanism
+            if "database connection pool" in stmt or "db_pool" in stmt:
+                action = "db_pool_resize"
+            elif "config" in stmt or "drift" in stmt:
+                action = "config_reload"
+            elif "connection failure" in stmt or "refusal" in stmt:
+                action = "restart"
+            elif "memory" in stmt or "oom" in stmt or "cpu" in stmt:
+                action = "restart"
             break
 
-    res = calculate_reverse_blast_radius(root_cause_service, action="db_pool_resize" if root_cause_service == "payment-service" else "restart")
-    proposal = f"Apply targeted mitigation on '{root_cause_service}': {res['summary']}"
+    res = calculate_reverse_blast_radius(root_cause_service, action=action)
+    proposal = f"Apply targeted mitigation on '{root_cause_service}' ({action}): {res['summary']}"
     return {
         "affected_callers": res["affected_callers"],
         "blast_radius_score": res["blast_radius_score"],
         "remediation_proposal": proposal,
     }
-

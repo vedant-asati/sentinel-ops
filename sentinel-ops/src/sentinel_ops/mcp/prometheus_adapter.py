@@ -1,3 +1,4 @@
+import json
 import httpx
 from typing import Any, Dict, List, Literal, Optional, Tuple
 from sentinel_ops.core.config import settings
@@ -56,7 +57,16 @@ class PrometheusAdapter:
                     params={"query": promql, "start": start_iso, "end": end_iso, "step": step},
                 )
                 resp.raise_for_status()
-                data = resp.json().get("data", {}).get("result", [])
+                try:
+                    data = resp.json().get("data", {}).get("result", [])
+                except (json.JSONDecodeError, ValueError) as err:
+                    return {
+                        "status": "TOOL_FAILURE",
+                        "promql": promql,
+                        "error": f"Failed to parse Prometheus JSON response: {err}",
+                        "result": [],
+                        "formatted": "",
+                    }
                 
                 # Cap series count to prevent context exhaustion
                 capped_data = data[:max_series]

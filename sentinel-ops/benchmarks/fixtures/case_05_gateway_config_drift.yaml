@@ -1,43 +1,54 @@
 id: case_05
 title: Payment Gateway Endpoint Configuration Drift (Connection Refused)
-alert_text: >
-  Alert: checkout-service order placement failing with 100% ECONNREFUSED on payment gateway
-  and downstream 500 Internal Server Errors starting at 18:00:00Z.
-incident_timestamp: "2026-11-24T18:00:00Z"
+alert_text: 'Alert: checkout-service order placement failing with 100% ECONNREFUSED
+  on payment gateway and downstream 500 Internal Server Errors starting at 18:00:00Z.
+
+  '
+incident_timestamp: '2026-11-24T18:00:00Z'
 target_service: checkout-service
 candidate_hypotheses:
-  - "Hypothesis A: payment-service port/URL configuration drift causing immediate connection refusal"
-  - "Hypothesis B: pricing-service algorithmic calculation latency"
+- 'Hypothesis A: payment-service port/URL configuration drift causing immediate connection
+  refusal'
+- 'Hypothesis B: pricing-service algorithmic calculation latency'
 ground_truth:
   root_cause_service: payment-service
   mechanism: config_drift_connection_refused
-  description: >
-    Deployment rollout injected mismatched payment gateway port (8443 instead of 8004),
-    causing immediate ECONNREFUSED and zero active connections established.
+  description: 'Deployment rollout injected mismatched payment gateway port (8443
+    instead of 8004), causing immediate ECONNREFUSED and zero active connections established.
+
+    '
   expected_terminal_status: SUPPORTED_DIAGNOSIS
   distinguishing_signals:
-    - backend: prometheus
-      service: payment-service
-      metric_type: error_rate
-      expected_value: 1.0
-  falsified_hypothesis: "Hypothesis B (pricing-service latency is healthy at 20ms)"
+  - backend: prometheus
+    service: payment-service
+    metric_type: error_rate
+    expected_value: 1.0
+  falsified_hypothesis: Hypothesis B (pricing-service latency is healthy at 20ms)
 mock_telemetry:
   prometheus:
     payment-service:
       error_rate:
         status: SUCCESS
-        values: [[1732471200, "1.0"]]
+        values:
+        - - 1795543200
+          - '1.0'
       db_pool_active:
         status: SUCCESS
-        values: [[1732471200, "0.0"]]
+        values:
+        - - 1795543200
+          - '0.0'
     pricing-service:
       latency_p95:
         status: SUCCESS
-        values: [[1732471200, "0.020"]]
+        values:
+        - - 1795543200
+          - '0.020'
     cart-service:
       error_rate:
         status: SUCCESS
-        values: [[1732471200, "0.00"]]
+        values:
+        - - 1795543200
+          - '0.00'
   tempo:
     trace_chk_05:
       status: SUCCESS

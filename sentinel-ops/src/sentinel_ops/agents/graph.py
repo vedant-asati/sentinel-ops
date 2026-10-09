@@ -82,6 +82,7 @@ def build_investigation_graph() -> StateGraph:
             "synthesizer": "synthesizer",
             "supervisor": "supervisor",
             "insufficient_evidence": "insufficient_evidence",
+            "operational_failure": "operational_failure",
         },
     )
 

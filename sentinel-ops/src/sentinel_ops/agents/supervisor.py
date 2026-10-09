@@ -1,9 +1,25 @@
 import logging
-from typing import Any, Dict, List
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Tuple
 from langgraph.types import Send
 from sentinel_ops.agents.state import InvestigationState
 
 logger = logging.getLogger(__name__)
+
+
+def compute_incident_window(incident_timestamp: str, before_minutes: int = 2, after_minutes: int = 3) -> Tuple[str, str]:
+    """Computes a dynamic observation window anchored to incident timestamp."""
+    try:
+        clean_ts = incident_timestamp.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(clean_ts)
+    except Exception:
+        dt = datetime.now(timezone.utc)
+    start_dt = dt - timedelta(minutes=before_minutes)
+    end_dt = dt + timedelta(minutes=after_minutes)
+    return (
+        start_dt.isoformat().replace("+00:00", "Z"),
+        end_dt.isoformat().replace("+00:00", "Z"),
+    )
 
 
 def supervisor_node(state: InvestigationState) -> Dict[str, Any]:
@@ -26,8 +42,8 @@ def supervisor_node(state: InvestigationState) -> Dict[str, Any]:
 def route_supervisor_to_specialists(state: InvestigationState) -> List[Send]:
     """LangGraph Send router: fans out tasks concurrently to metrics and trace specialists."""
     tasks: List[Send] = []
-
     sim_telem = state.simulated_telemetry
+    window = compute_incident_window(state.incident_timestamp)
 
     # 1. Dispatch Metrics Specialist for payment-service
     tasks.append(
@@ -37,7 +53,7 @@ def route_supervisor_to_specialists(state: InvestigationState) -> List[Send]:
                 "incident_id": state.incident_id,
                 "service": "payment-service",
                 "metric_type": "db_pool_active",
-                "observation_window": (state.incident_timestamp, state.incident_timestamp),
+                "observation_window": window,
                 "incident_timestamp": state.incident_timestamp,
                 "simulated_telemetry": sim_telem,
             },
@@ -52,7 +68,7 @@ def route_supervisor_to_specialists(state: InvestigationState) -> List[Send]:
                 "incident_id": state.incident_id,
                 "service": "pricing-service",
                 "metric_type": "latency_p95",
-                "observation_window": (state.incident_timestamp, state.incident_timestamp),
+                "observation_window": window,
                 "incident_timestamp": state.incident_timestamp,
                 "simulated_telemetry": sim_telem,
             },
@@ -66,13 +82,14 @@ def route_supervisor_to_specialists(state: InvestigationState) -> List[Send]:
             {
                 "incident_id": state.incident_id,
                 "target_service": state.target_service,
+                "observation_window": window,
                 "incident_timestamp": state.incident_timestamp,
                 "simulated_telemetry": sim_telem,
             },
         )
     )
 
-    # 4. Dispatch Metrics Specialist for cart-service (memory_usage) if cart alert or telemetry present
+    # 4. Dispatch Metrics Specialist for cart-service if alert or telemetry present
     has_cart = "cart" in state.alert_text.lower() or (sim_telem and "cart-service" in sim_telem.get("prometheus", {}))
     if has_cart:
         tasks.append(
@@ -82,7 +99,20 @@ def route_supervisor_to_specialists(state: InvestigationState) -> List[Send]:
                     "incident_id": state.incident_id,
                     "service": "cart-service",
                     "metric_type": "memory_usage",
-                    "observation_window": (state.incident_timestamp, state.incident_timestamp),
+                    "observation_window": window,
+                    "incident_timestamp": state.incident_timestamp,
+                    "simulated_telemetry": sim_telem,
+                },
+            )
+        )
+        tasks.append(
+            Send(
+                "metrics_specialist",
+                {
+                    "incident_id": state.incident_id,
+                    "service": "cart-service",
+                    "metric_type": "container_restarts",
+                    "observation_window": window,
                     "incident_timestamp": state.incident_timestamp,
                     "simulated_telemetry": sim_telem,
                 },
@@ -99,7 +129,7 @@ def route_supervisor_to_specialists(state: InvestigationState) -> List[Send]:
                     "incident_id": state.incident_id,
                     "service": "payment-service",
                     "metric_type": "error_rate",
-                    "observation_window": (state.incident_timestamp, state.incident_timestamp),
+                    "observation_window": window,
                     "incident_timestamp": state.incident_timestamp,
                     "simulated_telemetry": sim_telem,
                 },
