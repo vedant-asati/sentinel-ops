@@ -106,23 +106,33 @@ class TopologyGraphRAG:
         self.tau_days = tau_days
 
     def calculate_graph_distance(self, svc_alert: str, svc_postmortem: str) -> float:
-        """Calculates undirected shortest path distance between two services in the graph."""
+        """Calculates causal / shortest path distance between two services in the graph."""
         if svc_alert == svc_postmortem:
             return 0.0
-        undirected_g = self.graph.to_undirected()
-        if svc_alert in undirected_g and svc_postmortem in undirected_g:
-            try:
-                return float(nx.shortest_path_length(undirected_g, svc_alert, svc_postmortem))
-            except nx.NetworkXNoPath:
-                return 5.0
-        return 5.0
+        if svc_alert in self.graph and svc_postmortem in self.graph:
+            if nx.has_path(self.graph, svc_alert, svc_postmortem):
+                return float(nx.shortest_path_length(self.graph, svc_alert, svc_postmortem))
+            elif nx.has_path(self.graph, svc_postmortem, svc_alert):
+                return float(nx.shortest_path_length(self.graph, svc_postmortem, svc_alert))
+            else:
+                undirected_g = self.graph.to_undirected()
+                try:
+                    return float(nx.shortest_path_length(undirected_g, svc_alert, svc_postmortem))
+                except nx.NetworkXNoPath:
+                    return float("inf")
+        return float("inf")
 
     def calculate_recency_decay(self, incident_time_iso: str, postmortem_time_iso: str) -> float:
         """Calculates exponential decay factor exp(-delta_days / tau_days)."""
         try:
+            if self.tau_days <= 0:
+                return 0.5
             t_now = datetime.fromisoformat(incident_time_iso.replace("Z", "+00:00"))
             t_pm = datetime.fromisoformat(postmortem_time_iso.replace("Z", "+00:00"))
-            delta_days = max(0.0, (t_now - t_pm).total_seconds() / 86400.0)
+            diff_seconds = (t_now - t_pm).total_seconds()
+            if diff_seconds < 0:
+                return 1.0
+            delta_days = diff_seconds / 86400.0
             return math.exp(-delta_days / self.tau_days)
         except Exception:
             return 0.5
@@ -140,7 +150,10 @@ class TopologyGraphRAG:
         for pm in self.postmortems:
             sim_score = compute_text_cosine_similarity(alert_text, f"{pm.title} {pm.summary}")
             graph_dist = self.calculate_graph_distance(target_service, pm.root_cause_service)
-            topo_score = 1.0 / (1.0 + graph_dist)
+            if math.isinf(graph_dist):
+                topo_score = 0.0
+            else:
+                topo_score = 1.0 / (1.0 + graph_dist)
             decay_score = self.calculate_recency_decay(incident_timestamp, pm.timestamp)
 
             composite_score = (
@@ -148,6 +161,9 @@ class TopologyGraphRAG:
                 + (self.w_graph * topo_score)
                 + (self.w_decay * decay_score)
             )
+            # If text similarity is zero (completely irrelevant incident text), penalize composite score
+            if sim_score == 0.0:
+                composite_score = composite_score * 0.2
 
             scored_records.append({
                 "postmortem": pm,

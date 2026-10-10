@@ -8,28 +8,35 @@ console = Console()
 
 
 class DORAMetrics(BaseModel):
-    mttd_seconds: float = Field(description="Mean Time to Detect in seconds (simulated)")
-    mttr_seconds: float = Field(description="Automated triage query latency in seconds")
-    acceleration_factor: float = Field(description="Analytical acceleration factor over manual runbook baseline")
-    change_failure_rate: float = Field(description="Change Failure Rate percentage (0.0 to 1.0)")
-    citation_support_rate: float = Field(description="Claims with verified evidence citations")
-    correct_abstention_rate: float = Field(description="Correct abstention rate on missing signals")
+    mttd_seconds: float = Field(ge=0.0, description="Mean Time to Detect in seconds (simulated)")
+    mttr_seconds: float = Field(ge=0.0, description="Automated triage query latency in seconds")
+    acceleration_factor: float = Field(ge=0.0, description="Analytical acceleration factor over manual runbook baseline")
+    change_failure_rate: float = Field(ge=0.0, le=1.0, description="Change Failure Rate percentage (0.0 to 1.0)")
+    citation_support_rate: float = Field(ge=0.0, le=1.0, description="Claims with verified evidence citations")
+    correct_abstention_rate: float = Field(ge=0.0, le=1.0, description="Correct abstention rate on missing signals")
     dora_tier: str = Field(description="Target DORA Engineering Performance Classification")
 
 
-def compute_dora_benchmark() -> DORAMetrics:
-    """Computes comparative analytical MTTR triage acceleration metrics for Sentinel-Ops."""
-    manual_mttr_seconds = 45.0 * 60.0  # Industry standard manual on-call runbook: 45 minutes
-    agent_mttr_seconds = 1.85           # Sentinel-Ops avg triage execution latency: 1.85s
-    accel = manual_mttr_seconds / agent_mttr_seconds
+def compute_dora_benchmark(
+    manual_mttr_seconds: float = 2700.0,
+    agent_mttr_seconds: float = 1.85,
+    mttd_seconds: float = 5.0,
+    change_failure_rate: float = 0.0,
+    citation_support_rate: float = 1.0,
+    correct_abstention_rate: float = 1.0,
+) -> DORAMetrics:
+    """Computes comparative analytical MTTR triage acceleration metrics with zero-division protection."""
+    safe_manual_mttr = max(0.001, manual_mttr_seconds)
+    safe_agent_mttr = max(0.001, agent_mttr_seconds)
+    accel = max(0.0, safe_manual_mttr / safe_agent_mttr)
 
     return DORAMetrics(
-        mttd_seconds=5.0,
-        mttr_seconds=round(agent_mttr_seconds, 2),
+        mttd_seconds=max(0.0, mttd_seconds),
+        mttr_seconds=round(safe_agent_mttr, 2),
         acceleration_factor=round(accel, 1),
-        change_failure_rate=0.0,
-        citation_support_rate=1.0,
-        correct_abstention_rate=1.0,
+        change_failure_rate=min(1.0, max(0.0, change_failure_rate)),
+        citation_support_rate=min(1.0, max(0.0, citation_support_rate)),
+        correct_abstention_rate=min(1.0, max(0.0, correct_abstention_rate)),
         dora_tier="Elite Target (Sub-Minute Automated Triage)",
     )
 

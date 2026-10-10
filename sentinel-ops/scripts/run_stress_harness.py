@@ -95,7 +95,7 @@ def test_section_1_server_crashes_and_fuzz():
 def test_section_2_concurrency_and_race_conditions():
     section_header("2. Concurrency & Race Conditions (state.py, deadline.py, prober.py)")
     from sentinel_ops.agents.state import EvidenceItem, merge_evidence_items
-    from sentinel_ops.core.deadline import DeadlineTracker
+    from sentinel_ops.core.deadline import DeadlineTracker, RunDeadlineExceeded
 
     # 2.1 State Reducer Commutativity Violation
     console.print("[yellow]2.1 Testing State Reducer Commutativity Violation in merge_evidence_items...[/yellow]")
@@ -171,22 +171,25 @@ def test_section_2_concurrency_and_race_conditions():
     tracker = DeadlineTracker(deadline_seconds=0.0001)
     time.sleep(0.005)
     assert tracker.is_expired()
-    timeout = tracker.bounded_timeout(5.0)
-    console.print(f"  Expired tracker bounded_timeout(5.0) -> [bold cyan]{timeout}[/bold cyan]")
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.listen(1)
-
     try:
-        urllib.request.urlopen(f"http://127.0.0.1:{port}", timeout=timeout)
-    except urllib.error.URLError as e:
+        timeout = tracker.bounded_timeout(5.0)
+        console.print(f"  Expired tracker bounded_timeout(5.0) -> [bold cyan]{timeout}[/bold cyan]")
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.listen(1)
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}", timeout=timeout)
+        except urllib.error.URLError as e:
+            console.print(
+                f"[bold red]✔ SOCKET CRASH CONFIRMED:[/bold red] Passing bounded_timeout(5.0)==0.0 causes immediate socket failure: {e}"
+            )
+        finally:
+            s.close()
+    except RunDeadlineExceeded as e:
         console.print(
-            f"[bold red]✔ SOCKET CRASH CONFIRMED:[/bold red] Passing bounded_timeout(5.0)==0.0 causes immediate socket failure: {e}"
+            f"  [bold green]✔ SOCKET PROTECTED:[/bold green] bounded_timeout raised RunDeadlineExceeded fast ({e}), preventing [Errno 115] socket crash."
         )
-    finally:
-        s.close()
 
 
 def test_section_3_memory_and_descriptor_leaks():

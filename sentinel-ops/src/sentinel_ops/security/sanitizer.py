@@ -14,8 +14,17 @@ TELEMETRY_SYSTEM_RULE = (
 
 
 def defang_telemetry_tags(content: str) -> str:
-    """Defangs any embedded <telemetry> or </telemetry> tags so raw text cannot escape its boundary."""
-    return re.sub(r"(?i)</?\s*telemetry", "[defanged-tag]", content)
+    """Defangs embedded <telemetry> boundaries, prompt injection role tags, and XML entity variants."""
+    # 1. Defang telemetry tags and entity representations
+    content = re.sub(r"(?i)</?\s*telemetry(?:\s+[^>]*)?>", "[defanged-tag]", content)
+    content = re.sub(r"(?i)&lt;/?\s*telemetry(?:\s+[^&]*)?&gt;", "[defanged-tag]", content)
+    
+    # 2. Defang prompt injection role/control tags and evidence spoofing
+    control_tags = r"(?i)</?\s*(system(?:_override)?|assistant|user|observation|evidence)(?:\s+[^>]*)?>"
+    content = re.sub(control_tags, "[defanged-control-tag]", content)
+    control_entities = r"(?i)&lt;/?\s*(system(?:_override)?|assistant|user|observation|evidence)(?:\s+[^&]*)?&gt;"
+    content = re.sub(control_entities, "[defanged-control-tag]", content)
+    return content
 
 
 def wrap_telemetry(name: str, raw_content: str, char_limit: int = MAX_TELEMETRY_CHARS) -> str:

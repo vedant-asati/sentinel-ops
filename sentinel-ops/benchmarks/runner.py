@@ -113,10 +113,13 @@ def run_benchmark():
         c_id = c["id"]
         gt_cause = f"{c['ground_truth']['root_cause_service']} ({c['ground_truth']['mechanism']})"
         
+        # Sanitize input: strip ground truth so candidate models evaluate telemetry honestly
+        c_input = {k: v for k, v in c.items() if k != "ground_truth"}
+        
         # Run baselines
-        det_res = deterministic_engine.diagnose(c)
-        sp_res = single_pass_engine.diagnose(c)
-        agent_res = sentinel_agent.diagnose(c)
+        det_res = deterministic_engine.diagnose(c_input)
+        sp_res = single_pass_engine.diagnose(c_input)
+        agent_res = sentinel_agent.diagnose(c_input)
         results[c_id] = {"agent": agent_res, "single_pass": sp_res, "deterministic": det_res}
 
         det_str = f"{det_res['diagnosed_root_cause']} [{det_res['terminal_status'][:4]}]"
@@ -161,7 +164,21 @@ def run_benchmark():
     console.print("\n[bold white]Key Architectural Metrics Demonstrated (Dynamically Evaluated):[/bold white]")
     console.print(f"  ✔ [green]Root-Cause Precision:[/green] {precision_pct:.1f}% ({correct_diagnoses}/{len(diagnosable_cases)} cases matched ground truth)")
     console.print(f"  ✔ [green]Correct Abstention Rate:[/green] {abstention_pct:.1f}% ({correct_abstentions}/{len(abstention_cases)} withheld cases safely abstained; Single-Pass LLM hallucinated {sp_hallucination_pct:.1f}%)")
-    console.print("  ✔ [green]Citation Contract Support:[/green] 100% of claims cite verified [EV-xxx] observations")
+    # Dynamic citation contract evaluation
+    total_claims = 0
+    valid_citation_claims = 0
+    for c in diagnosable_cases:
+        agent_data = results[c["id"]]["agent"]
+        claims = agent_data.get("claims", [])
+        evidence = agent_data.get("evidence", [])
+        if claims:
+            total_claims += len(claims)
+            is_valid, _ = validate_claims_and_citations(claims, evidence)
+            if is_valid:
+                valid_citation_claims += len(claims)
+
+    citation_pct = (valid_citation_claims / total_claims * 100.0) if total_claims else 100.0
+    console.print(f"  ✔ [green]Citation Contract Support:[/green] {citation_pct:.1f}% of claims cite verified [EV-xxx] observations (Dynamically Verified)")
 
 
 if __name__ == "__main__":

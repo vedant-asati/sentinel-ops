@@ -3,10 +3,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    # Model configuration
+    # Model configuration (gemini-3.5-flash-lite has 500 RPD / 15 RPM / 250K TPM on free tier)
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL_SUPERVISOR: str = "gemini-3.8-flash"
-    GEMINI_MODEL_SYNTHESIZER: str = "gemini-3.1-pro-preview"
+    GEMINI_MODEL_SUPERVISOR: str = "gemini-3.5-flash-lite"
+    GEMINI_MODEL_SYNTHESIZER: str = "gemini-3.5-flash-lite"
     
     # Telemetry backend endpoints (Server-side enforced only)
     PROMETHEUS_URL: str = "http://localhost:59090"

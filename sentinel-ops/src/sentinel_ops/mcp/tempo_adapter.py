@@ -18,6 +18,17 @@ class TempoAdapter:
         max_spans: int = 25
     ) -> Dict[str, Any]:
         """Retrieves and summarizes trace span hierarchy, isolating the bottleneck span via exclusive self-time."""
+        # Sanitize against path traversal attacks
+        if not trace_id or ".." in trace_id or "/" in trace_id or "\\" in trace_id:
+            return {
+                "status": "TOOL_FAILURE",
+                "trace_id": trace_id,
+                "error": "Invalid trace_id: directory traversal or path characters detected",
+                "spans": [],
+                "bottleneck_service": None,
+                "formatted": "",
+            }
+
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 resp = await client.get(f"{self.base_url}/api/traces/{trace_id}")
@@ -27,7 +38,8 @@ class TempoAdapter:
                         "trace_id": trace_id,
                         "spans": [],
                         "bottleneck_service": None,
-                        "formatted": ""
+                        "bottleneck_duration_ms": 0.0,
+                        "formatted": wrap_telemetry(f"tempo_trace_{trace_id}", f"Trace: {trace_id}\nNo trace spans found\n"),
                     }
                 resp.raise_for_status()
                 try:
@@ -42,19 +54,23 @@ class TempoAdapter:
                         "formatted": "",
                     }
 
-                # Extract batches/spans
+                # Extract batches/spans safely handling empty or malformed structures
                 spans_summary = []
                 batches = data.get("batches", [])
                 for b in batches:
-                    svc = b.get("resource", {}).get("attributes", [{}])[0].get("value", {}).get("stringValue", "unknown")
+                    res_attrs = b.get("resource", {}).get("attributes") or []
+                    svc = "unknown"
+                    if res_attrs and isinstance(res_attrs, list) and isinstance(res_attrs[0], dict):
+                        svc = res_attrs[0].get("value", {}).get("stringValue", "unknown")
+
                     scope_spans = b.get("scopeSpans", [])
                     for ss in scope_spans:
                         for s in ss.get("spans", []):
                             span_id = s.get("spanId", "")
                             parent_span_id = s.get("parentSpanId", "")
                             span_name = s.get("name", "span")
-                            start_nano = int(s.get("startTimeUnixNano", 0))
-                            end_nano = int(s.get("endTimeUnixNano", 0))
+                            start_nano = int(s.get("startTimeUnixNano") or 0)
+                            end_nano = int(s.get("endTimeUnixNano") or 0)
                             duration_ms = (end_nano - start_nano) / 1_000_000 if end_nano > start_nano else 0.0
 
                             span_info = {
@@ -63,23 +79,53 @@ class TempoAdapter:
                                 "service": svc,
                                 "name": span_name,
                                 "duration_ms": round(duration_ms, 2),
+                                "start_nano": start_nano,
+                                "end_nano": end_nano,
                             }
                             spans_summary.append(span_info)
 
-                # Attribute bottleneck using exclusive self-time: duration - sum(children_durations)
-                children_durations = {}
+                if not spans_summary:
+                    return {
+                        "status": "EMPTY",
+                        "trace_id": trace_id,
+                        "spans": [],
+                        "bottleneck_service": None,
+                        "bottleneck_duration_ms": 0.0,
+                        "formatted": wrap_telemetry(f"tempo_trace_{trace_id}", f"Trace: {trace_id}\nNo trace spans found\n"),
+                    }
+
+                # Attribute bottleneck using interval union self-time (prevents parallel child erasure)
+                parent_intervals: Dict[str, List[tuple[int, int]]] = {}
                 for span in spans_summary:
                     p_id = span.get("parent_span_id")
-                    if p_id:
-                        children_durations[p_id] = children_durations.get(p_id, 0.0) + span["duration_ms"]
+                    if p_id and span.get("start_nano") is not None and span.get("end_nano") is not None:
+                        parent_intervals.setdefault(p_id, []).append((span["start_nano"], span["end_nano"]))
+
+                def compute_merged_duration_ms(intervals: List[tuple[int, int]]) -> float:
+                    if not intervals:
+                        return 0.0
+                    sorted_intervals = sorted(intervals, key=lambda x: x[0])
+                    merged = []
+                    curr_start, curr_end = sorted_intervals[0]
+                    for s, e in sorted_intervals[1:]:
+                        if s <= curr_end:
+                            curr_end = max(curr_end, e)
+                        else:
+                            merged.append((curr_start, curr_end))
+                            curr_start, curr_end = s, e
+                    merged.append((curr_start, curr_end))
+                    return sum(max(0, e - s) for s, e in merged) / 1_000_000.0
 
                 max_exclusive = -1.0
                 bottleneck_span = None
                 for span in spans_summary:
                     s_id = span.get("span_id")
-                    child_time = children_durations.get(s_id, 0.0)
-                    exclusive_ms = max(0.0, span["duration_ms"] - child_time)
+                    child_active_ms = compute_merged_duration_ms(parent_intervals.get(s_id, []))
+                    exclusive_ms = max(0.0, span["duration_ms"] - child_active_ms)
                     span["exclusive_duration_ms"] = round(exclusive_ms, 2)
+                    # Clean up internal nano fields
+                    span.pop("start_nano", None)
+                    span.pop("end_nano", None)
                     if exclusive_ms > max_exclusive:
                         max_exclusive = exclusive_ms
                         bottleneck_span = span
@@ -89,7 +135,7 @@ class TempoAdapter:
 
                 raw_repr = (
                     f"Trace: {trace_id}\n"
-                    f"Bottleneck Service: {bottleneck_span['service'] if bottleneck_span else 'None'} ({max_exclusive:.2f}ms exclusive)\n"
+                    f"Bottleneck Service: {bottleneck_span['service'] if bottleneck_span else 'None'} ({max(0.0, max_exclusive):.2f}ms exclusive)\n"
                     f"Spans: {capped_spans}"
                 )
 
@@ -99,7 +145,7 @@ class TempoAdapter:
                     "trace_id": trace_id,
                     "spans": capped_spans,
                     "bottleneck_service": bottleneck_span["service"] if bottleneck_span else None,
-                    "bottleneck_duration_ms": max_exclusive,
+                    "bottleneck_duration_ms": max(0.0, max_exclusive),
                     "formatted": formatted,
                 }
             except (httpx.HTTPError, json.JSONDecodeError, ValueError, Exception) as e:

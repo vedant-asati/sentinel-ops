@@ -32,17 +32,16 @@ from sentinel_ops.memory.graph_rag import (
 
 class TestGraphRAGPathologicalTopologies:
     def test_disconnected_subgraph_distance_inversion(self):
-        """Vulnerability: Disconnected subgraphs return fallback distance 5.0,
-
-        ranking an isolated/unreachable service CLOSER than a connected service 6 hops away!
+        """HARDENING REGRESSION TEST:
+        Disconnected subgraphs must return infinite distance (0.0 proximity),
+        ranking connected deep dependencies strictly HIGHER than unreachable services.
         """
         g = nx.DiGraph()
-        # Build 6-hop connected chain: A -> B -> C -> D -> E -> F -> G (distance 6)
         chain = ["A", "B", "C", "D", "E", "F", "G"]
         for i in range(len(chain) - 1):
             g.add_edge(chain[i], chain[i + 1])
 
-        # Add completely isolated/disconnected node Z (separate cluster/zone)
+        # Add completely isolated/disconnected node Z
         g.add_node("Z")
 
         rag = TopologyGraphRAG(graph=g)
@@ -50,25 +49,20 @@ class TestGraphRAGPathologicalTopologies:
         dist_connected = rag.calculate_graph_distance("A", "G")
         dist_disconnected = rag.calculate_graph_distance("A", "Z")
 
-        # Distance to connected service is 6.0
         assert dist_connected == 6.0
-        # Distance to completely disconnected service falls back to 5.0!
-        assert dist_disconnected == 5.0
+        assert math.isinf(dist_disconnected)
 
-        # Topological score: 1 / (1 + dist)
-        topo_score_connected = 1.0 / (1.0 + dist_connected)       # 1/7 = 0.1429
-        topo_score_disconnected = 1.0 / (1.0 + dist_disconnected) # 1/6 = 0.1667
+        topo_score_connected = 1.0 / (1.0 + dist_connected)
+        topo_score_disconnected = 0.0
 
-        # EXPLOIT: Disconnected service receives a HIGHER proximity score than connected service!
-        assert topo_score_disconnected > topo_score_connected, (
-            f"Expected disconnected node score ({topo_score_disconnected:.4f}) "
-            f"to invert and exceed connected node score ({topo_score_connected:.4f})"
-        )
+        # Connected service is ranked HIGHER than disconnected service
+        assert topo_score_connected > topo_score_disconnected
 
     def test_circular_dependency_collapses_causal_distance(self):
-        """Vulnerability: In a directed circular dependency A -> B -> C -> A,
-
-        converting to undirected collapses directional causal distance from 2 hops (A->B->C) to 1 hop.
+        """HARDENING REGRESSION TEST:
+        In a directed circular dependency A -> B -> C -> A,
+        directional causal distance from A to C is 2 hops (A -> B -> C)
+        and must not be shortcutted to 1 hop.
         """
         g = nx.DiGraph()
         g.add_edge("checkout-service", "cart-service")
@@ -76,14 +70,8 @@ class TestGraphRAGPathologicalTopologies:
         g.add_edge("auth-service", "checkout-service")  # circular dependency
 
         rag = TopologyGraphRAG(graph=g)
-        # Undirected distance between checkout and auth is 1.0 (via reverse edge)
         dist = rag.calculate_graph_distance("checkout-service", "auth-service")
-        assert dist == 1.0
-
-        # Causal directed distance from checkout to auth is actually 2 hops (checkout -> cart -> auth)
-        causal_directed_dist = nx.shortest_path_length(g, "checkout-service", "auth-service")
-        assert causal_directed_dist == 2.0
-        assert dist < causal_directed_dist  # Undirected shortcuts causal direction
+        assert dist == 2.0
 
     def test_direction_blindness_confuses_cause_and_effect(self):
         """Vulnerability: DiGraph is converted to undirected, making callee -> caller
@@ -110,10 +98,9 @@ class TestGraphRAGPathologicalTopologies:
 
 class TestVectorDistanceDegeneracy:
     def test_zero_similarity_forces_confident_retrieval(self):
-        """Vulnerability: An alert with zero semantic similarity to any postmortem
-
-        still receives composite score >= 0.50 if target_service matches root_cause_service,
-        forcing irrelevant postmortem recommendations into agent state.
+        """HARDENING REGRESSION TEST:
+        An alert with zero semantic similarity to any postmortem must be penalized
+        (composite_score < 0.25) so irrelevant postmortems are not falsely promoted.
         """
         postmortems = [
             PostmortemIncident(
@@ -130,7 +117,6 @@ class TestVectorDistanceDegeneracy:
 
         rag = TopologyGraphRAG(postmortems=postmortems)
 
-        # Alert has completely zero semantic relevance (UI/CSS issue)
         alert_text = "Frontend navbar button purple color misaligned on safari browser"
         results = rag.retrieve(
             alert_text=alert_text,
@@ -141,12 +127,9 @@ class TestVectorDistanceDegeneracy:
 
         assert len(results) == 1
         res = results[0]
-        # Text similarity is 0.0
         assert res["sim_score"] == 0.0
-        # But composite score is 0.50 (w_graph * 1.0 + w_decay * 1.0)
-        assert res["composite_score"] >= 0.50
-        # Agent receives a false hypothesis recommendation for a CSS bug!
-        assert "Investigate checkout-service for db_pool_exhaustion" in res["recommended_hypothesis"]
+        # Composite score is penalized below 0.25 threshold
+        assert res["composite_score"] < 0.25
 
     def test_token_inflation_degeneracy(self):
         """Vulnerability: Repeated tokens artificially inflate term frequency without IDF weighting."""

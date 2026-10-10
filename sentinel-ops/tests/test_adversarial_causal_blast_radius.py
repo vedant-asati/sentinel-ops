@@ -22,24 +22,21 @@ from sentinel_ops.agents.blast_radius import (
 
 class TestBlastRadiusVulnerabilities:
     def test_score_explosion_past_one_due_to_hardcoded_denominator(self, monkeypatch):
-        """Vulnerability: caller_ratio = len(affected_callers) / 4.0 hardcodes 4.0.
-
-        In a 10-service topology, a shared dependency with 8 callers results in
-        caller_ratio = 2.0 and blast_radius_score = 1.52 (> 1.0), breaking score invariants!
+        """HARDENING REGRESSION TEST:
+        Blast radius score must remain strictly bounded in [0.0, 1.0],
+        even on large topologies with many callers.
         """
-        # Create a topology with 10 microservices all calling shared-db
         large_graph = nx.DiGraph()
         for i in range(8):
             large_graph.add_edge(f"service-{i}", "shared-db")
 
-        # Monkeypatch build_service_graph to return large_graph
         import sentinel_ops.agents.blast_radius as br
         monkeypatch.setattr(br, "build_service_graph", lambda: large_graph)
 
         res = br.calculate_reverse_blast_radius("shared-db", action="db_pool_resize")
-        # Blast radius score explodes past 1.0!
-        assert res["blast_radius_score"] > 1.0, f"Expected score > 1.0, got {res['blast_radius_score']}"
-        assert res["blast_radius_score"] == 1.52  # (0.6 * 8/4) + (0.4 * 0.8) = 1.2 + 0.32
+        # Blast radius score is strictly bounded <= 1.0
+        assert res["blast_radius_score"] <= 1.0
+        assert res["blast_radius_score"] == 0.92
 
     def test_inverted_blast_radius_edge_gateway_low_risk(self):
         """Vulnerability: Customer-facing gateway (checkout-service) has 0 upstream callers,
@@ -102,13 +99,13 @@ class TestBlastRadiusVulnerabilities:
         assert res_a["blast_radius_score"] == res_b["blast_radius_score"] == res_c["blast_radius_score"]
 
     def test_unsafe_fallback_for_catastrophic_actions(self):
-        """Vulnerability: Dangerous unmapped actions (e.g. 'drop_all_tables', 'kernel_panic')
-
-        fall back to action_weights.get(action, 0.5), treating a catastrophic wipe with the same
-        weight as a routine restart (0.5).
+        """HARDENING REGRESSION TEST:
+        Dangerous unmapped actions (e.g. 'drop_all_tables') must be flagged
+        as Critical Risk (1.00) and never treated with routine restart weight.
         """
         res_routine = calculate_reverse_blast_radius("payment-service", action="restart")
         res_catastrophic = calculate_reverse_blast_radius("payment-service", action="drop_all_tables")
 
-        # Catastrophic table drop has the exact same score as a safe service restart!
-        assert res_routine["blast_radius_score"] == res_catastrophic["blast_radius_score"]
+        assert res_catastrophic["blast_radius_score"] == 1.0
+        assert res_catastrophic["blast_radius_level"] == "Critical"
+        assert res_catastrophic["blast_radius_score"] > res_routine["blast_radius_score"]

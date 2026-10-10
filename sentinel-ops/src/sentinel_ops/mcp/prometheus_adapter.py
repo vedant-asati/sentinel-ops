@@ -1,4 +1,6 @@
 import json
+import math
+import re
 import httpx
 from typing import Any, Dict, List, Literal, Optional, Tuple
 from sentinel_ops.core.config import settings
@@ -49,19 +51,32 @@ class PrometheusAdapter:
                 "formatted": ""
             }
 
-        promql = METRIC_QUERY_TEMPLATES[metric_type].format(service=service)
+        # Enforce window schema validation safely
+        if not window or not isinstance(window, (tuple, list)) or len(window) != 2:
+            return {
+                "status": "TOOL_FAILURE",
+                "promql": "",
+                "error": "Invalid window: must be a 2-tuple or 2-element list of (start_iso, end_iso)",
+                "result": [],
+                "formatted": ""
+            }
+
         start_iso, end_iso = window
+        # Sanitize step parameter against query string injection
+        safe_step = re.sub(r"[^0-9a-zA-Z]", "", step) if step else "15s"
+        promql = METRIC_QUERY_TEMPLATES[metric_type].format(service=service)
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
                 resp = await client.get(
                     f"{self.base_url}/api/v1/query_range",
-                    params={"query": promql, "start": start_iso, "end": end_iso, "step": step},
+                    params={"query": promql, "start": start_iso, "end": end_iso, "step": safe_step},
                 )
                 if resp.status_code == 200:
                     try:
                         resp_json = resp.json()
-                        if not resp_json.get("data", {}).get("result"):
+                        resp_data = resp_json.get("data") or {}
+                        if not resp_data.get("result"):
                             # Fallback to instant query if range was too narrow or zero samples in window
                             resp = await client.get(
                                 f"{self.base_url}/api/v1/query",
@@ -72,7 +87,8 @@ class PrometheusAdapter:
 
                 resp.raise_for_status()
                 try:
-                    data = resp.json().get("data", {}).get("result", [])
+                    resp_json = resp.json()
+                    data = (resp_json.get("data") or {}).get("result", [])
                 except (json.JSONDecodeError, ValueError) as err:
                     return {
                         "status": "TOOL_FAILURE",

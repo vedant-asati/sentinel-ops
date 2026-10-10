@@ -12,6 +12,9 @@ from sentinel_ops.memory.graph_rag import TopologyGraphRAG
 logger = logging.getLogger(__name__)
 
 
+ALLOWED_REMEDIATION_ACTIONS = {"config_reload", "restart", "db_pool_resize"}
+
+
 class MCPToolRegistry:
     """Standard Model Context Protocol (MCP) tool registry exposing bounded telemetry tools."""
 
@@ -28,18 +31,37 @@ class MCPToolRegistry:
         end_iso: str,
     ) -> Dict[str, Any]:
         """Queries Prometheus metrics over an anchored time window [start_iso, end_iso]."""
-        return await self.prom_adapter.query_metric(
+        raw_res = await self.prom_adapter.query_metric(
             service=service,
             metric_type=metric_type,  # type: ignore
             window=(start_iso, end_iso),
         )
+        # Cap result array to prevent context window exhaustion
+        if raw_res.get("status") == "SUCCESS" and "result" in raw_res:
+            series_list = raw_res["result"][:5]
+            for s in series_list:
+                vals = s.get("values", [])
+                if len(vals) > 100:
+                    # Keep first 50 and last 50 points
+                    s["values"] = vals[:50] + vals[-50:]
+            raw_res["result"] = series_list
+        return raw_res
 
     async def tempo_get_trace(self, trace_id: str) -> Dict[str, Any]:
         """Retrieves and analyzes a distributed trace waterfall from Tempo."""
         return await self.tempo_adapter.get_trace_waterfall(trace_id=trace_id)
 
     def calculate_blast_radius(self, target_service: str, action: str = "restart") -> Dict[str, Any]:
-        """Computes upstream caller transitive blast radius and risk score."""
+        """Computes upstream caller transitive blast radius and risk score with strict parameter validation."""
+        if action not in ALLOWED_REMEDIATION_ACTIONS:
+            return {
+                "target_service": target_service,
+                "error": f"Invalid or unapproved remediation action '{action}'. Approved actions: {list(ALLOWED_REMEDIATION_ACTIONS)}",
+                "blast_radius_score": 1.0,
+                "blast_radius_level": "Critical",
+                "affected_callers": [],
+                "summary": f"UNAPPROVED ACTION '{action}' on '{target_service}' blocked by MCP safety policy (Score: 1.00, Critical Risk)",
+            }
         return calculate_reverse_blast_radius(target_service=target_service, action=action)
 
     def query_graph_rag(
@@ -49,7 +71,14 @@ class MCPToolRegistry:
         incident_timestamp: str,
         top_k: int = 2,
     ) -> List[Dict[str, Any]]:
-        """Retrieves top-k historical incident postmortems using topology-aware GraphRAG."""
+        """Retrieves top-k historical incident postmortems using topology-aware GraphRAG with timestamp validation."""
+        # Validate ISO-8601 timestamp
+        from datetime import datetime
+        try:
+            datetime.fromisoformat(incident_timestamp.replace("Z", "+00:00"))
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError(f"Invalid ISO-8601 incident_timestamp: '{incident_timestamp}'")
+
         matches = self.graph_rag.retrieve(
             alert_text=alert_text,
             target_service=target_service,
@@ -74,8 +103,8 @@ mcp_registry = MCPToolRegistry()
 
 
 def list_tools() -> List[Dict[str, Any]]:
-    """Returns tool schemas in standard MCP format."""
-    return [
+    """Returns tool schemas in standard MCP format conforming to MCP 2024-11-05 spec."""
+    tools = [
         {
             "name": "promql_range_query",
             "description": "Server-enforced time-anchored query for Prometheus metrics.",
@@ -127,6 +156,62 @@ def list_tools() -> List[Dict[str, Any]]:
             },
         },
     ]
+    # Conform to standard MCP 2024-11-05 inputSchema
+    for t in tools:
+        t["inputSchema"] = dict(t["parameters"])
+    return tools
+
+
+def get_mcp_tools_envelope() -> Dict[str, Any]:
+    """Returns standard MCP JSON-RPC tools/list response structure."""
+    return {"tools": list_tools()}
+
+
+async def handle_jsonrpc_request(request: Dict[str, Any]) -> Dict[str, Any]:
+    """JSON-RPC 2.0 dispatcher for Model Context Protocol."""
+    req_id = request.get("id")
+    method = request.get("method")
+    params = request.get("params") or {}
+
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {"name": "sentinel-ops-mcp", "version": "1.0.0"},
+                "capabilities": {"tools": {}},
+            },
+        }
+    elif method == "tools/list":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": list_tools()}}
+    elif method == "tools/call":
+        name = params.get("name")
+        arguments = params.get("arguments") or {}
+        if name == "calculate_blast_radius":
+            res = mcp_registry.calculate_blast_radius(**arguments)
+            return {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": json.dumps(res)}]}}
+        elif name == "tempo_get_trace":
+            res = await mcp_registry.tempo_get_trace(**arguments)
+            return {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": json.dumps(res)}]}}
+        elif name == "promql_range_query":
+            res = await mcp_registry.promql_range_query(**arguments)
+            return {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": json.dumps(res)}]}}
+        elif name == "query_graph_rag":
+            res = mcp_registry.query_graph_rag(**arguments)
+            return {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": json.dumps(res)}]}}
+        else:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32601, "message": f"Method not found or unknown tool: {name}"},
+            }
+    else:
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32601, "message": f"Unknown method: {method}"},
+        }
 
 
 if __name__ == "__main__":

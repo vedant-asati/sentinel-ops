@@ -9,19 +9,24 @@ class DeterministicRuleBaseline:
         prom = telemetry.get("prometheus", {})
         tempo = telemetry.get("tempo", {})
 
-        # Rule 1: Payment DB pool saturation check
+        # Rule 1: Payment DB pool saturation check (checks pool size capacity & occupancy)
         payment_prom = prom.get("payment-service", {})
         db_pool = payment_prom.get("db_pool_active", {})
         if db_pool.get("status") == "SUCCESS":
             values = db_pool.get("values", [])
-            if values and float(values[-1][1]) >= 2.0:
-                return {
-                    "baseline": "deterministic_rules",
-                    "diagnosed_root_cause": "payment-service",
-                    "mechanism": "db_pool_exhaustion",
-                    "terminal_status": "SUPPORTED_DIAGNOSIS",
-                    "confidence": 0.90,
-                }
+            pool_size_obj = payment_prom.get("db_pool_size", {})
+            pool_size = float(pool_size_obj.get("values", [[0, 2.0]])[-1][1]) if pool_size_obj.get("status") == "SUCCESS" else 2.0
+            if values:
+                active_val = float(values[-1][1])
+                # Saturates when active connections reach capacity (occupancy >= 90%)
+                if pool_size > 0 and (active_val / pool_size) >= 0.90:
+                    return {
+                        "baseline": "deterministic_rules",
+                        "diagnosed_root_cause": "payment-service",
+                        "mechanism": "db_pool_exhaustion",
+                        "terminal_status": "SUPPORTED_DIAGNOSIS",
+                        "confidence": 0.90,
+                    }
 
         # Rule 2: Pricing latency spike check
         pricing_prom = prom.get("pricing-service", {})

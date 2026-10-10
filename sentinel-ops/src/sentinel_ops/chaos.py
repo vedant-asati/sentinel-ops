@@ -1,4 +1,5 @@
 import argparse
+import re
 import httpx
 from rich.console import Console
 from rich.table import Table
@@ -31,18 +32,18 @@ def inject_fault(service: str, fault_type: str):
 
 
 def recover_all():
-    """Recovers all microservices to healthy baseline state."""
+    """Recovers all microservices to healthy baseline state with bounded timeout."""
     console.print("[bold yellow]Recovering all sandbox microservices to healthy baseline...[/bold yellow]")
     for svc, port in SERVICE_PORTS.items():
         try:
-            resp = httpx.post(f"http://localhost:{port}/fault/inject?fault_type=recover", timeout=5.0)
+            resp = httpx.post(f"http://localhost:{port}/fault/inject?fault_type=recover", timeout=1.5)
             console.print(f"  ✔ {svc} recovered.")
         except Exception as e:
             console.print(f"  [red]✖ {svc} recovery error: {e}[/red]")
 
 
 def print_status():
-    """Displays health and active fault state across all microservices."""
+    """Displays health and active fault state across all microservices using robust metric parsing."""
     table = Table(title="Sandbox Microservices Telemetry Status", show_header=True, header_style="bold magenta")
     table.add_column("Service", style="cyan", width=18)
     table.add_column("Port", style="white", width=8)
@@ -54,13 +55,24 @@ def print_status():
             resp = httpx.get(f"http://localhost:{port}/health", timeout=2.0)
             health_str = "[green]OK[/green]" if resp.status_code == 200 else "[red]FAIL[/red]"
             
-            # Check metrics for active fault
+            # Check metrics for active fault across all services
             m_resp = httpx.get(f"http://localhost:{port}/metrics", timeout=2.0)
             fault = "None (Healthy)"
-            if "payment_db_pool_active{service=\"payment-service\"} 2.0" in m_resp.text:
+            m_text = m_resp.text
+            
+            m_pay = re.search(r'payment_db_pool_active(?:\{[^}]*\})?\s+([0-9.]+)', m_text)
+            m_cpu = re.search(r'container_cpu_usage_seconds_total(?:\{[^}]*\})?\s+([0-9.]+)', m_text)
+            m_cart = re.search(r'cart_cache_connections_refused_total(?:\{[^}]*\})?\s+([0-9.]+)', m_text)
+            m_mem = re.search(r'container_memory_usage_ratio(?:\{[^}]*\})?\s+([0-9.]+)', m_text)
+
+            if m_pay and float(m_pay.group(1)) >= 1.99:
                 fault = "[bold red]db_pool_exhaustion[/bold red]"
-            elif "container_cpu_usage_seconds_total{container=\"pricing-service\"} 0.98" in m_resp.text:
+            elif m_cpu and float(m_cpu.group(1)) >= 0.85:
                 fault = "[bold red]cpu_saturation[/bold red]"
+            elif m_cart and float(m_cart.group(1)) >= 1.0:
+                fault = "[bold red]cart_cache_refusal[/bold red]"
+            elif m_mem and float(m_mem.group(1)) >= 0.90:
+                fault = "[bold red]memory_leak_oom[/bold red]"
             
             table.add_row(svc, str(port), health_str, fault)
         except Exception:

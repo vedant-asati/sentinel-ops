@@ -16,18 +16,33 @@ def calculate_reverse_blast_radius(target_service: str, action: str = "restart")
     """Traverses UPSTREAM callers (ancestors) to calculate impact of modifying target_service."""
     graph = build_service_graph()
     
-    if target_service in graph:
-        # Ancestors of target_service are all upstream nodes that reach target_service
-        affected_callers = sorted(list(nx.ancestors(graph, target_service)))
-    else:
-        affected_callers = []
-        
+    if target_service not in graph:
+        return {
+            "target_service": target_service,
+            "affected_callers": [],
+            "blast_radius_score": 1.0,
+            "blast_radius_level": "Critical",
+            "summary": f"Target service '{target_service}' unknown in topology graph: flagged as Critical Risk (1.00)",
+        }
+
     action_weights = {"config_reload": 0.1, "restart": 0.5, "db_pool_resize": 0.8}
-    w_action = action_weights.get(action, 0.5)
-    
-    caller_ratio = len(affected_callers) / 4.0
-    score = (0.6 * caller_ratio) + (0.4 * w_action)
+    w_action = action_weights.get(action)
+    if w_action is None:
+        return {
+            "target_service": target_service,
+            "affected_callers": [],
+            "blast_radius_score": 1.0,
+            "blast_radius_level": "Critical",
+            "error": f"Invalid or unapproved remediation action '{action}'. Approved actions: {list(action_weights.keys())}",
+            "summary": f"UNAPPROVED ACTION '{action}' on '{target_service}' blocked by safety policy (Score: 1.00, Critical Risk)",
+        }
+        
+    affected_callers = sorted(list(nx.ancestors(graph, target_service)))
+    caller_ratio = min(1.0, len(affected_callers) / 4.0)
+    score = min(1.0, max(0.0, (0.6 * caller_ratio) + (0.4 * w_action)))
     level = "Low" if score < 0.35 else ("Medium" if score < 0.65 else "High")
+    if score >= 0.90:
+        level = "Critical"
     
     return {
         "target_service": target_service,
