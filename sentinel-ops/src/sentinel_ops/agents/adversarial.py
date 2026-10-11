@@ -1,10 +1,42 @@
 import logging
 import time
-from typing import Any, Dict
-from sentinel_ops.agents.state import AdversarialVerdict, InvestigationState
+from typing import Any, Dict, List, Tuple
+from sentinel_ops.agents.state import AdversarialVerdict, AtomicClaim, EvidenceItem, InvestigationState
 from sentinel_ops.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def validate_claims_and_citations(
+    claims: List[AtomicClaim],
+    evidence: List[EvidenceItem],
+) -> Tuple[bool, List[str]]:
+    """Enforces atomic claim citation contracts against collected evidence."""
+    errors: List[str] = []
+
+    claim_types = {c.claim_type for c in claims}
+    if "root_cause" not in claim_types:
+        errors.append("Diagnosis lacks an atomic 'root_cause' claim.")
+    if "mechanism" not in claim_types:
+        errors.append("Diagnosis lacks an atomic 'mechanism' claim.")
+
+    failed_or_empty_ids = {e.id for e in evidence if e.status != "SUCCESS"}
+    all_known_ids = {e.id for e in evidence}
+
+    for claim in claims:
+        if not claim.cited_evidence_ids:
+            errors.append(f"Claim '{claim.claim_id}' contains zero cited evidence IDs.")
+            continue
+
+        for cited_id in claim.cited_evidence_ids:
+            if cited_id not in all_known_ids:
+                errors.append(f"Claim '{claim.claim_id}' cites unknown evidence ID '{cited_id}'.")
+            elif cited_id in failed_or_empty_ids:
+                errors.append(
+                    f"Claim '{claim.claim_id}' cites non-successful evidence ID '{cited_id}' (status not SUCCESS)."
+                )
+
+    return len(errors) == 0, errors
 
 
 def adversarial_reviewer_node(state: InvestigationState) -> Dict[str, Any]:

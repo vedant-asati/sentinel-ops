@@ -1,14 +1,103 @@
+import json
 import logging
 from typing import Any, Dict, List
+from sentinel_ops.agents.llm_planner import refine_brief_with_llm
 from sentinel_ops.agents.state import AtomicClaim, InvestigationState
 
 logger = logging.getLogger(__name__)
 
 
-def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
+def format_incident_brief(state: Dict[str, Any] | InvestigationState, fmt: str = "markdown") -> str:
+    """Renders a strict read-only on-call Incident Brief from terminal investigation state."""
+    data = state.model_dump() if isinstance(state, InvestigationState) else dict(state)
+    incident_id = data.get("incident_id", "unknown")
+    target_service = data.get("target_service", "checkout-service")
+    status = data.get("terminal_status", "OPERATIONAL_FAILURE")
+    reason = data.get("terminal_reason", "")
+    summary = data.get("root_cause_summary") or "No causal mechanism substantiated."
+    brief_narrative = data.get("incident_brief_narrative")
+    mechanism = data.get("mechanism") or "undetermined"
+    claims = data.get("structured_claims") or []
+    evidence = data.get("evidence") or []
+    next_checks = data.get("next_discriminating_checks") or []
+    callers = data.get("affected_callers") or []
+    blast_score = data.get("blast_radius_score")
+    runbook_action = data.get("recommended_runbook_action")
+
+    def _ev_dict(ev):
+        return ev.model_dump() if hasattr(ev, "model_dump") else dict(ev)
+
+    def _cl_dict(cl):
+        return cl.model_dump() if hasattr(cl, "model_dump") else dict(cl)
+
+    ev_list = [_ev_dict(e) for e in evidence]
+    cl_list = [_cl_dict(c) for c in claims]
+
+    if fmt == "json":
+        return json.dumps(
+            {
+                "incident_id": incident_id,
+                "target_service": target_service,
+                "terminal_status": status,
+                "root_cause_summary": summary,
+                "mechanism": mechanism,
+                "claims": cl_list,
+                "evidence_count": len(ev_list),
+                "affected_callers": callers,
+                "blast_radius_score": blast_score,
+                "next_discriminating_checks": next_checks,
+                "advisory_runbook_action": runbook_action,
+            },
+            indent=2,
+        )
+
+    lines = [
+        f"# On-Call Incident Brief: `{incident_id}`",
+        "",
+        f"- **Target Service:** `{target_service}`",
+        f"- **Terminal Status:** `{status}`",
+        f"- **Timestamp Anchor:** `{data.get('incident_timestamp', 'N/A')}`",
+        "",
+        "## Assessment Summary",
+        brief_narrative if (brief_narrative and status == "SUPPORTED_DIAGNOSIS") else (summary if status == "SUPPORTED_DIAGNOSIS" else (reason or summary)),
+        "",
+    ]
+
+    if cl_list:
+        lines.append("## Grounded Claims & Telemetry Citations")
+        for c in cl_list:
+            cites = ", ".join(f"`[{cid}]`" for cid in c.get("cited_evidence_ids", []))
+            lines.append(f"- **{c.get('claim_id')} (`{c.get('claim_type')}`)**: {c.get('statement')} (Cites: {cites})")
+        lines.append("")
+
+    if ev_list:
+        lines.append("## Evidence Ledger")
+        for e in ev_list:
+            lines.append(f"- **`[{e.get('id')}]` ({e.get('status')}, {e.get('backend_source')})**: {e.get('finding')}")
+        lines.append("")
+
+    if callers or blast_score is not None:
+        lines.append("## Advisory Blast Radius")
+        lines.append(f"- **Upstream Affected Callers:** {', '.join(callers) if callers else 'None'}")
+        lines.append(f"- **Risk Score:** {blast_score if blast_score is not None else 'N/A'}")
+        if runbook_action:
+            lines.append(f"- **Advisory Inspection / Runbook Command (Read-Only Suggestion):** `{runbook_action}`")
+        lines.append("")
+
+    lines.append("## Next Discriminating Checks")
+    if next_checks:
+        for chk in next_checks:
+            lines.append(f"- {chk}")
+    else:
+        lines.append("- Verify downstream dependency metrics and trace spans in target window.")
+    return "\n".join(lines) + "\n"
+
+
+async def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
     """RCA Synthesizer: builds structured atomic claims with explicit evidence citations
 
     and provides actionable next discriminating checks and runbook actions.
+    When state.use_llm=True, refines narrative summary strictly from verified evidence.
     """
     logger.info("Synthesizer formulating grounded root-cause diagnosis...")
 
@@ -266,9 +355,25 @@ def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
         ]
         runbook_action = "Perform manual telemetry inspection before executing automated remediation."
 
+    brief_narrative = None
+    if state.use_llm and claims:
+        refined = await refine_brief_with_llm(
+            alert_text=state.alert_text,
+            target_service=state.target_service,
+            verified_claims=[c.model_dump() for c in claims],
+            evidence=[e.model_dump() for e in evidence_list],
+            next_checks=next_checks,
+            deadline_timestamp=state.deadline_timestamp,
+        )
+        if refined:
+            brief_narrative = refined.executive_summary
+            if refined.prioritized_next_check and refined.prioritized_next_check not in next_checks:
+                next_checks = [refined.prioritized_next_check] + next_checks
+
     return {
         "structured_claims": claims,
         "root_cause_summary": summary,
+        "incident_brief_narrative": brief_narrative,
         "mechanism": mechanism,
         "next_discriminating_checks": next_checks,
         "recommended_runbook_action": runbook_action,

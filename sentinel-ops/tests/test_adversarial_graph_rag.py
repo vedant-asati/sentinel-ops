@@ -140,14 +140,10 @@ class TestVectorDistanceDegeneracy:
         assert sim > 0.0
 
     def test_special_characters_and_single_char_token_stripping(self):
-        """Vulnerability: Regex [a-zA-Z0-9_-]{2,} silently drops single-character tokens and symbols.
-
-        Identical texts consisting of symbols or single-letter names return 0.0 similarity.
-        """
-        assert tokenize("a b c d") == []
-        assert tokenize("$$$ ### @@@") == []
-        assert compute_text_cosine_similarity("service A", "service A") == 1.0  # only 'service' matched
-        assert compute_text_cosine_similarity("service A", "service B") == 1.0  # A and B dropped, gives false 1.0!
+        """INVARIANT: Single-character tokens are preserved so 'service A' != 'service B'."""
+        assert tokenize("a b c d") == ["a", "b", "c", "d"]
+        assert compute_text_cosine_similarity("service A", "service A") == pytest.approx(1.0)
+        assert compute_text_cosine_similarity("service A", "service B") < 1.0
 
 
 class TestEdgeWeightCorruption:
@@ -172,27 +168,21 @@ class TestEdgeWeightCorruption:
 
 class TestTemporalDecayVulnerabilities:
     def test_offset_naive_vs_aware_silent_exception(self):
-        """Vulnerability: Naive timestamp vs aware timestamp raises TypeError in datetime,
-
-        silently swallowed by broad except Exception, falling back to static 0.5.
-        """
+        """INVARIANT: Naive and UTC-aware ISO timestamps normalize cleanly instead of falling back to 0.5."""
         rag = TopologyGraphRAG()
-        # incident_time has no timezone (naive), postmortem has Z (aware)
-        decay = rag.calculate_recency_decay("2026-11-24T14:32:00", "2026-10-15T10:00:00Z")
-        assert decay == 0.5  # Silent fallback due to caught TypeError
+        decay_naive = rag.calculate_recency_decay("2026-11-24T14:32:00", "2026-10-15T10:00:00Z")
+        decay_aware = rag.calculate_recency_decay("2026-11-24T14:32:00Z", "2026-10-15T10:00:00Z")
+        assert decay_naive == pytest.approx(decay_aware)
+        assert decay_naive != 0.5
 
     def test_future_postmortem_yields_maximum_recency(self):
-        """Vulnerability: If postmortem timestamp is in the future relative to incident (clock skew),
-
-        delta_days is clamped to max(0.0, negative) = 0.0, returning max decay score 1.0.
-        """
+        """INVARIANT: Future-dated postmortems relative to incident time receive 0.0 recency score."""
         rag = TopologyGraphRAG()
-        # Postmortem is in the future (year 2027) relative to incident (2026)
         decay = rag.calculate_recency_decay("2026-11-24T14:32:00Z", "2027-11-24T14:32:00Z")
-        assert decay == 1.0
+        assert decay == 0.0
 
     def test_zero_and_negative_tau_crashes_swallowed(self):
-        """Vulnerability: tau_days <= 0 causes ZeroDivisionError, silently swallowed and returns 0.5."""
+        """INVARIANT: Non-positive tau_days raises explicit ValueError rather than swallowing division errors."""
         rag_zero_tau = TopologyGraphRAG(tau_days=0.0)
-        decay = rag_zero_tau.calculate_recency_decay("2026-11-24T14:32:00Z", "2026-10-15T10:00:00Z")
-        assert decay == 0.5
+        with pytest.raises(ValueError, match="tau_days must be positive"):
+            rag_zero_tau.calculate_recency_decay("2026-11-24T14:32:00Z", "2026-10-15T10:00:00Z")

@@ -1,10 +1,12 @@
 from __future__ import annotations
 from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class EvidenceItem(BaseModel):
     """Immutable factual observation collected by a telemetry adapter."""
+    model_config = ConfigDict(frozen=True)
+
     id: str = Field(description="Deterministic observation ID, e.g., EV-001")
     backend_source: Literal["prometheus", "tempo"] = Field(description="Telemetry source")
     query_string: str = Field(description="Exact PromQL or trace ID queried")
@@ -52,6 +54,8 @@ def merge_evidence_items(
 
 class AtomicClaim(BaseModel):
     """Atomic claim with explicit evidence citation mapping."""
+    model_config = ConfigDict(frozen=True)
+
     claim_id: str = Field(description="e.g., CL-001")
     statement: str = Field(description="Single factual assertion")
     claim_type: Literal["symptom", "root_cause", "mechanism", "competing_hypothesis_falsified"]
@@ -88,6 +92,8 @@ class InvestigationState(BaseModel):
     evidence: Annotated[List[EvidenceItem], merge_evidence_items] = Field(default_factory=list)
     
     # Query dispatch & budgets
+    use_llm: bool = Field(default=False, description="Enable bounded Neuro-Symbolic LLM planning")
+    llm_planned_probes: List[Dict[str, str]] = Field(default_factory=list)
     crag_iterations: int = 0
     crag_sufficient: bool = False
     missing_evidence_hints: List[str] = Field(default_factory=list)
@@ -100,6 +106,7 @@ class InvestigationState(BaseModel):
     # Diagnosis & Claims
     structured_claims: List[AtomicClaim] = Field(default_factory=list)
     root_cause_summary: Optional[str] = None
+    incident_brief_narrative: Optional[str] = None
     mechanism: Optional[str] = Field(default=None, description="Validated root-cause mechanism identifier")
     adversarial_verdict: Optional[AdversarialVerdict] = None
     adversarial_iterations: int = 0

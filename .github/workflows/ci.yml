@@ -29,17 +29,17 @@ jobs:
           cd sentinel-ops
           uv sync --extra dev
 
-      - name: Run unit and evaluator calibration tests
+      - name: Run unit, adversarial, and observability contract tests
         run: |
           cd sentinel-ops
           uv run --extra dev python -m pytest -v
 
-      - name: Run fixture replay matrix
+      - name: Run fixture replay matrix (offline verification gate)
         run: |
           cd sentinel-ops
           uv run --extra dev python -m benchmarks.runner
 
-      - name: Run DORA Metrics Analytics Report
+      - name: Run Triage Latency & Epistemic Report
         run: |
           cd sentinel-ops
           uv run python -m sentinel_ops.analytics.dora

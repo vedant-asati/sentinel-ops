@@ -1,16 +1,16 @@
-# Sentinel-Ops: Autonomous AI SRE & Root Cause Analysis Platform
+# Sentinel-Ops: Evidence-Grounded Incident Investigation & Observability Gym
 
 [![CI/CD](https://github.com/vedant-asati/Sentinel-Ops-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/vedant-asati/Sentinel-Ops-Platform/actions/workflows/ci.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-orange.svg)](https://github.com/langchain-ai/langgraph)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![DORA Model: Elite Target](https://img.shields.io/badge/DORA_Model-Elite_Target-brightgreen.svg)](#-analytical-mttr-triage-acceleration-model)
+[![Challenge Gate: 40/40](https://img.shields.io/badge/Challenge_Gate-40%2F40_Passing-brightgreen.svg)](#-benchmark-replay-matrix)
 
-> **Sentinel-Ops** is an open-source autonomous Site Reliability Engineering (AI SRE) investigation and triage assistant. Built on **LangGraph**, **FastMCP telemetry standardization**, a containerized **Docker Compose microservices chaos sandbox**, and advanced SRE capabilities: **Topology-Aware GraphRAG**, **CRAG sufficiency gating**, **Fresh-Context Adversarial Red-Teaming**, **Indirect Prompt-Injection Firewalls**, and **Safe Read-Only Advisory Triage Guidance**.
+> **Sentinel-Ops** is a neuro-symbolic Site Reliability Engineering (SRE) **Read-Only Incident Brief & Observability Contract Platform** built on **LangGraph**, **FastMCP 2024-11-05 tool schemas**, a **Docker Compose microservices & OTLP/Prometheus chaos sandbox**, **Topology-Aware GraphRAG**, **CRAG sufficiency gating**, **Cold-Slate Formal Verification**, and bounded **`gemini-3.5-flash-lite` planning**.
 
 ---
 
-## 🏛️ System Architecture
+## 🏛️ 3-Tier Architecture
 
 ```
                   ┌──────────────────────────────────────────────┐
@@ -26,8 +26,8 @@
                                          │
                                          ▼
                   ┌──────────────────────────────────────────────┐
-                  │           Supervisor Planner Node            │
-                  │  (Decomposes Alert into Competing Causes)    │
+                  │   Supervisor & Bounded Planner (--use-llm)   │
+                  │  (Symbolic Default / Gemini 3.5 Flash Lite)  │
                   └──────────────────────┬───────────────────────┘
                                          │
                     ┌────────────────────┴────────────────────┐
@@ -35,11 +35,11 @@
                     ▼                                         ▼
      ┌─────────────────────────────┐           ┌─────────────────────────────┐
      │  Metrics Specialist Node    │           │   Trace Specialist Node     │
-     │  (Prometheus MCP Adapter)   │           │   (Tempo MCP Trace Adapter) │
+     │  (Anchored PromQL Adapter)  │           │   (Tempo Interval-Union)    │
      └──────────────┬──────────────┘           └──────────────┬──────────────┘
                     │                                         │
                     └────────────────────┬────────────────────┘
-                                         │ Concurrent Merge via Reducer
+                                         │ Commutative Immutable Merge
                                          ▼
                   ┌──────────────────────────────────────────────┐
                   │          CRAG Sufficiency Evaluator          │
@@ -47,38 +47,25 @@
                   └──────────────┬───────────────────────────────┘
                                  │
                    ┌─────────────┴─────────────┐
-        Sufficient │                           │ Inconclusive & Retries Exhausted
+        Sufficient │                           │ Inconclusive / Collector Down
                    ▼                           ▼
-     ┌───────────────────────────┐   ┌──────────────────────────────────┐
-     │   RCA Synthesizer Node    │   │  TERMINAL: INSUFFICIENT_EVIDENCE │
-     │  Enforces Atomic Claims & │   │   Strict Abstention Invariant    │
-     │     Citation Contract     │   │ (Remediation Strictly Forbidden) │
-     └─────────────┬─────────────┘   └──────────────────────────────────┘
+     ┌───────────────────────────┐   ┌──────────────────────────────────────┐
+     │   RCA Synthesizer & Brief │   │ TERMINAL: INSUFFICIENT_EVIDENCE      │
+     │  Enforces Atomic Claims & │   │        or OPERATIONAL_FAILURE        │
+     │     Citation Contract     │   │  (Outputs Next Discriminating Check) │
+     └─────────────┬─────────────┘   └──────────────────────────────────────┘
                    │
                    ▼
      ┌───────────────────────────┐
-     │ Fresh-Context Adversarial │
-     │  Red-Team Skeptic Node    │
-     │ (Cold-slate Prosecutor)   │
+     │ Cold-Slate Formal Skeptic │
+     │ (Zero Prior Bias Verifier)│
      └─────────────┬─────────────┘
                    │ Entailment Verified
                    ▼
      ┌───────────────────────────┐
-     │ Reverse Upstream Blast    │
-     │   Radius Calculator       │
-     │ (nx.ancestors() Traversal)│
-     └─────────────┬─────────────┘
-                   │
-                   ▼
-     ┌───────────────────────────┐
-     │  Human-in-the-Loop (HITL) │
-     │  Approval Gate & Web SSE  │
-     └─────────────┬─────────────┘
-                   │
-                   ▼
-     ┌───────────────────────────┐
-     │   DPO Trajectory Logger   │
-     │ data/dpo/trajectories.json│
+     │ Mechanism-Driven Advisory │
+     │   Blast Radius & Export   │
+     │ (Read-Only Incident Brief)│
      └───────────────────────────┘
 ```
 
@@ -101,36 +88,22 @@
 
 ---
 
-## 📊 Benchmark Replay Matrix
+## 📊 Benchmark Replay & Counterfactual Challenge Matrix
 
-Sentinel-Ops is evaluated across 5 held-out incident cases against deterministic heuristic rules and an ungrounded single-pass LLM baseline:
+Sentinel-Ops is evaluated across **40 seeded blind counterfactual cases** (`benchmarks.challenge_gate`) plus a **5-case replay suite** contrasting our gated LangGraph agent against deterministic threshold rules and an offline ungrounded heuristic comparator (or an unconstrained live `gemini-3.5-flash-lite` single-pass baseline when invoked with `--live-llm`):
 
-| Case ID | Incident Ground Truth | Deterministic Rules | Single-Pass LLM | Sentinel-Ops LangGraph Agent |
+| Case ID | Incident Ground Truth | Deterministic Rules | Ungrounded Heuristic | Sentinel-Ops Agent |
 | :--- | :--- | :--- | :--- | :--- |
 | **`case_01`** | `payment-service` (DB pool exhaustion) | `payment-service` [SUPP] | `payment-service` [SUPP] | **`payment-service` (SUPPORTED)** |
 | **`case_02`** | `pricing-service` (CPU latency spike) | `pricing-service` [SUPP] | `pricing-service` [SUPP] | **`pricing-service` (SUPPORTED)** |
-| **`case_03`** | `unknown` (Telemetry signal withheld) | `unknown` [INSU] | `checkout-service` [SUPP] *(Hallucinated!)* | **`ABSTAINED` (INSUFFICIENT)** |
+| **`case_03`** | `unknown` (Telemetry signal withheld) | `unknown` [INSU] | `checkout-service` [SUPP] *(Guessed!)* | **`ABSTAINED` (INSUFFICIENT)** |
 | **`case_04`** | `cart-service` (Memory leak & OOM killer) | `cart-service` [SUPP] | `cart-service` [SUPP] | **`cart-service` (SUPPORTED)** |
 | **`case_05`** | `payment-service` (Config drift / 502 Gateway) | `payment-service` [SUPP] | `payment-service` [SUPP] | **`payment-service` (SUPPORTED)** |
 
-**Architectural Metrics:**
-- **Root-Cause Precision:** 100% across cases with present telemetry (Cases 1, 2, 4, 5).
-- **Correct Abstention Rate:** 100% (Case 3: refuses to guess on missing signals; single-pass baseline hallucinated a wrong service).
-- **Citation Contract Entailment:** 100% of claims cite verified observations.
-
----
-
-## ⚡ Analytical MTTR Triage Acceleration Model
-
-> **Methodology Notice:** The metrics below represent an **Analytical Triage Acceleration Model** contrasting industry-typical manual on-call runbook execution (45m baseline) against automated concurrent telemetry correlation. Production deployments require measuring real operator MTTR and recovery events.
-
-| Operational Dimension | Industry SRE Baseline | Sentinel-Ops Automated | Analytical Impact |
-| :--- | :--- | :--- | :--- |
-| **Mean Time to Detect (MTTD)** | 15 – 30 minutes | **5.0 seconds** | 99.4% Reduction |
-| **Mean Time to Triage (MTTR)** | 45.0 minutes (Manual Runbook) | **1.85 seconds** (Query) | **1460× Analytical Speedup** |
-| **Unsupported Claim Rate** | 33.3% (Single-pass LLM) | **0.0%** (Enforced Citations) | Zero Hallucinations |
-| **Correct Abstention Rate** | 0.0% (Hallucinates guess) | **100.0%** (CRAG Abstention) | Zero Ungrounded Fixes |
-| **Target Performance Tier** | Medium / High | **ELITE TARGET** | Top 5% Operational Target |
+**Verified Benchmark & Gate Metrics:**
+- **Counterfactual Challenge Gate:** **40/40 passed** (8 diagnosable positive cases grounded cleanly, 0 false support on withheld/stale/wrong-service/non-finite/flat-counter controls).
+- **Replay Suite Precision & Abstention:** **100% Root-Cause Precision (4/4)**, **100% Correct Abstention (1/1)**, **100% Citation Contract Adherence**.
+- **Measured Offline Replay Latency:** ~**0.04s per case** in symbolic offline mode (vs. an illustrative 45-minute manual runbook baseline; `--live-llm` adds bounded Gemini API round-trip latency respecting `15 RPM / 500 RPD` quotas).
 
 ---
 
@@ -145,18 +118,31 @@ Sentinel-Ops is evaluated across 5 held-out incident cases against deterministic
 ```bash
 ./demo.sh
 ```
-Runs a complete live demonstration: checks Docker microservices sandbox, injects chaos fault, scrapes Prometheus telemetry, runs multi-agent RCA triage, generates DORA acceleration metrics, and cleanly recovers sandbox services.
+Injects a live chaos fault into the containerized microservices sandbox, drives `/checkout` traffic emitting OTLP trace spans & Prometheus wait/histogram metrics, runs Sentinel-Ops triage on the captured trace ID, prints latency analytics, and cleanly recovers sandbox services.
 
-### 1. Run Complete Automated Test Suite (31 Tests)
+### 1. Run Complete Automated Test Suite (141 Tests)
 ```bash
 cd sentinel-ops
-uv run pytest
+uv run --extra dev pytest -v
 ```
 
-### 2. Run Comparative Replay Benchmark
+### 2. Run Comparative Benchmark & Opt-In Live LLM Comparison
 ```bash
 cd sentinel-ops
 uv run python -m benchmarks.runner
+# Compare real single-pass Gemini vs Neuro-Symbolic planner (requires GEMINI_API_KEY):
+uv run python -m benchmarks.runner --live-llm
+```
+
+### 3. Export Read-Only Incident Brief & Invoke Neuro-Symbolic LLM Mode
+```bash
+cd sentinel-ops
+# Export a grounded Read-Only Incident Brief to Markdown (or JSON):
+uv run python -m sentinel_ops.cli --case-id case_01 --export-brief ../tmp/incident_briefs/case_01.md
+uv run python -m sentinel_ops.cli --case-id case_03 --export-brief ../tmp/incident_briefs/case_03.md
+
+# Enable bounded Gemini 3.5 Flash Lite query planning on live telemetry:
+uv run python -m sentinel_ops.cli --live --target-service checkout-service --use-llm
 ```
 
 CI also runs a seeded incident decision gate. Reproduce a run locally with

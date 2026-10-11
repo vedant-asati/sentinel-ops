@@ -34,20 +34,18 @@ def test_approval_ledger_memory_leak_under_continuous_loop():
 
 
 def test_telemetry_adapters_instantiate_client_per_query():
-    """SOCKET / DESCRIPTOR LEAK:
-    PrometheusAdapter and TempoAdapter instantiate a new httpx.AsyncClient for every single
-    query method call instead of managing a persistent, pooled HTTP client.
-    Under high concurrency or continuous loops, this churns TCP sockets, depletes ephemeral ports,
-    and causes TIME_WAIT socket exhaustion.
+    """INVARIANT: PrometheusAdapter and TempoAdapter retain persistent pooled httpx.AsyncClient
+    instances rather than churning new clients per query.
     """
+    import httpx
+
     prom = PrometheusAdapter(base_url="http://localhost:59090")
     tempo = TempoAdapter(base_url="http://localhost:53201")
 
-    # In PrometheusAdapter.query_metric:
-    # "async with httpx.AsyncClient(timeout=self.timeout) as client:"
-    # Verify neither adapter retains an initialized persistent client
-    assert not hasattr(prom, "client") or getattr(prom, "client", None) is None
-    assert not hasattr(tempo, "client") or getattr(tempo, "client", None) is None
+    assert isinstance(prom.client, httpx.AsyncClient)
+    assert isinstance(tempo.client, httpx.AsyncClient)
+    assert prom._get_client() is prom.client
+    assert tempo._get_client() is tempo.client
 
 
 def test_dpo_trajectory_logger_concurrent_writes_no_lock(tmp_path: Path):

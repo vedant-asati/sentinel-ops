@@ -1,7 +1,9 @@
+import asyncio
 import json
 import time
 import urllib.request
 from typing import List, Optional
+import httpx
 from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.table import Table
@@ -26,6 +28,26 @@ class SmokeTestSchema(BaseModel):
     observed_code: int = Field(description="HTTP status code")
 
 
+async def async_list_available_gemini_models() -> List[str]:
+    """Non-blocking async Gemini catalog lookup using httpx.AsyncClient."""
+    if not settings.GEMINI_API_KEY:
+        return []
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={settings.GEMINI_API_KEY}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, headers={"User-Agent": "Sentinel-Ops/0.1"})
+            resp.raise_for_status()
+            data = resp.json()
+            return [
+                m["name"].replace("models/", "")
+                for m in data.get("models", [])
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+            ]
+    except Exception as e:
+        console.print(f"[bold red]Failed to fetch Gemini model catalog: {e}[/bold red]")
+        return []
+
+
 def list_available_gemini_models() -> List[str]:
     """Queries the Gemini API to list models supporting content generation."""
     if not settings.GEMINI_API_KEY:
@@ -43,6 +65,29 @@ def list_available_gemini_models() -> List[str]:
     except Exception as e:
         console.print(f"[bold red]Failed to fetch Gemini model catalog: {e}[/bold red]")
         return []
+
+
+async def async_run_structured_output_smoke_test(model_name: Optional[str] = None) -> ProbeResult:
+    """Executes non-blocking async structured output smoke test via ainvoke."""
+    target_model = model_name or settings.GEMINI_MODEL_SUPERVISOR
+    llm = get_chat_model(role="supervisor", model_name=target_model)
+    structured_llm = llm.with_structured_output(SmokeTestSchema)
+    prompt = "Telemetry alert: checkout-service responded with HTTP status 200. Parse into schema."
+    t0 = time.perf_counter()
+    result: SmokeTestSchema = await asyncio.wait_for(
+        structured_llm.ainvoke(prompt), timeout=settings.PER_LLM_TIMEOUT_SECONDS
+    )
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    assert result.service_name == "checkout-service", f"Unexpected service: {result.service_name}"
+    assert result.is_healthy is True, f"Expected is_healthy=True, got {result.is_healthy}"
+    assert result.observed_code == 200, f"Expected code=200, got {result.observed_code}"
+    return ProbeResult(
+        test_passed=True,
+        model_name=target_model,
+        greeting="Structured output contract verified",
+        detected_platform="Google Gemini API",
+        latency_ms=round(elapsed_ms, 2),
+    )
 
 
 def run_structured_output_smoke_test(model_name: Optional[str] = None) -> ProbeResult:

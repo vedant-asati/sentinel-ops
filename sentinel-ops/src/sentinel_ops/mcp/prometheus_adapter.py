@@ -10,9 +10,11 @@ ALLOWED_SERVICES = ("checkout-service", "cart-service", "pricing-service", "paym
 
 METRIC_QUERY_TEMPLATES = {
     "error_rate": 'payment_error_rate{{service="{service}"}}',
-    "latency_p95": 'http_request_duration_seconds_bucket{{service="{service}",le="0.95"}}',
+    "latency_p95": 'histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{{service="{service}"}}[1m])))',
     "db_pool_active": 'payment_db_pool_active{{service="{service}"}}',
     "db_pool_size": 'payment_db_pool_size{{service="{service}"}}',
+    "db_pool_acquire_timeouts_total": 'increase(payment_db_pool_acquire_timeouts_total{{service="{service}"}}[2m])',
+    "upstream_connect_timeouts_total": 'increase(upstream_connect_timeouts_total{{service="{service}"}}[2m])',
     "cpu_saturation": 'container_cpu_usage_seconds_total{{container="{service}"}}',
     "memory_usage": 'container_memory_usage_ratio{{container="{service}"}}',
     "container_restarts": 'container_restart_count{{container="{service}"}}',
@@ -20,19 +22,40 @@ METRIC_QUERY_TEMPLATES = {
 
 
 class PrometheusAdapter:
-    """Server-enforced Prometheus adapter with time-anchored bounded queries."""
+    """Server-enforced Prometheus adapter with persistent HTTP client and time-anchored bounded queries."""
 
     def __init__(self, base_url: Optional[str] = None, timeout: Optional[float] = None):
         self.base_url = base_url or settings.PROMETHEUS_URL
         self.timeout = timeout or settings.PER_QUERY_TIMEOUT_SECONDS
+        self.client: httpx.AsyncClient = httpx.AsyncClient(timeout=self.timeout)
+
+    async def aclose(self) -> None:
+        if self.client and not self.client.is_closed:
+            await self.client.aclose()
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self.client is None or self.client.is_closed:
+            self.client = httpx.AsyncClient(timeout=self.timeout)
+        return self.client
 
     async def query_metric(
         self,
         service: str,
-        metric_type: Literal["error_rate", "latency_p95", "db_pool_active", "db_pool_size", "cpu_saturation"],
+        metric_type: Literal[
+            "error_rate",
+            "latency_p95",
+            "db_pool_active",
+            "db_pool_size",
+            "db_pool_acquire_timeouts_total",
+            "upstream_connect_timeouts_total",
+            "cpu_saturation",
+            "memory_usage",
+            "container_restarts",
+        ],
         window: Tuple[str, str],  # (start_iso, end_iso) anchored to T_incident
         step: str = "15s",
-        max_series: int = 5
+        max_series: int = 5,
+        timeout_override: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Queries Prometheus metrics over an anchored time window."""
         if service not in ALLOWED_SERVICES:
@@ -65,59 +88,62 @@ class PrometheusAdapter:
         # Sanitize step parameter against query string injection
         safe_step = re.sub(r"[^0-9a-zA-Z]", "", step) if step else "15s"
         promql = METRIC_QUERY_TEMPLATES[metric_type].format(service=service)
+        effective_timeout = max(0.001, timeout_override) if timeout_override is not None else self.timeout
+        client = self._get_client()
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            try:
-                resp = await client.get(
-                    f"{self.base_url}/api/v1/query_range",
-                    params={"query": promql, "start": start_iso, "end": end_iso, "step": safe_step},
-                )
-                if resp.status_code == 200:
-                    try:
-                        resp_json = resp.json()
-                        resp_data = resp_json.get("data") or {}
-                        if not resp_data.get("result"):
-                            # Fallback to instant query if range was too narrow or zero samples in window
-                            resp = await client.get(
-                                f"{self.base_url}/api/v1/query",
-                                params={"query": promql},
-                            )
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-
-                resp.raise_for_status()
+        try:
+            resp = await client.get(
+                f"{self.base_url}/api/v1/query_range",
+                params={"query": promql, "start": start_iso, "end": end_iso, "step": safe_step},
+                timeout=effective_timeout,
+            )
+            if resp.status_code == 200:
                 try:
                     resp_json = resp.json()
-                    data = (resp_json.get("data") or {}).get("result", [])
-                except (json.JSONDecodeError, ValueError) as err:
-                    return {
-                        "status": "TOOL_FAILURE",
-                        "promql": promql,
-                        "error": f"Failed to parse Prometheus JSON response: {err}",
-                        "result": [],
-                        "formatted": "",
-                    }
-                
-                # Cap series count to prevent context exhaustion
-                capped_data = data[:max_series]
-                status = "SUCCESS" if capped_data else "EMPTY"
-                
-                formatted = wrap_telemetry(
-                    name=f"prom_{service}_{metric_type}",
-                    raw_content=str(capped_data)
-                )
-                return {
-                    "status": status,
-                    "promql": promql,
-                    "result": capped_data,
-                    "series_count": len(capped_data),
-                    "formatted": formatted
-                }
-            except (httpx.HTTPError, json.JSONDecodeError, ValueError, Exception) as e:
+                    resp_data = resp_json.get("data") or {}
+                    if not resp_data.get("result"):
+                        # Time-anchored fallback to instant query at incident end timestamp
+                        resp = await client.get(
+                            f"{self.base_url}/api/v1/query",
+                            params={"query": promql, "time": end_iso},
+                            timeout=effective_timeout,
+                        )
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+            resp.raise_for_status()
+            try:
+                resp_json = resp.json()
+                data = (resp_json.get("data") or {}).get("result", [])
+            except (json.JSONDecodeError, ValueError) as err:
                 return {
                     "status": "TOOL_FAILURE",
                     "promql": promql,
-                    "error": str(e),
+                    "error": f"Failed to parse Prometheus JSON response: {err}",
                     "result": [],
-                    "formatted": ""
+                    "formatted": "",
                 }
+
+            # Cap series count to prevent context exhaustion
+            capped_data = data[:max_series]
+            status = "SUCCESS" if capped_data else "EMPTY"
+
+            formatted = wrap_telemetry(
+                name=f"prom_{service}_{metric_type}",
+                raw_content=str(capped_data)
+            )
+            return {
+                "status": status,
+                "promql": promql,
+                "result": capped_data,
+                "series_count": len(capped_data),
+                "formatted": formatted
+            }
+        except (httpx.HTTPError, json.JSONDecodeError, ValueError, Exception) as e:
+            return {
+                "status": "TOOL_FAILURE",
+                "promql": promql,
+                "error": str(e),
+                "result": [],
+                "formatted": ""
+            }

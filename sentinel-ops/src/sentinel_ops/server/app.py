@@ -1,17 +1,21 @@
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 import re
+import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 import yaml
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
-from pydantic import BaseModel
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
+from pydantic import BaseModel, Field
 
 from sentinel_ops.agents.graph import compile_investigation_graph
+from sentinel_ops.agents.synthesizer import format_incident_brief
+from sentinel_ops.core.config import settings
 from sentinel_ops.memory.graph_rag import TopologyGraphRAG
 from sentinel_ops.dpo.trajectory_logger import DPOTrajectoryLogger
 
@@ -37,13 +41,19 @@ APPROVAL_LEDGER: BoundedLedger = BoundedLedger(maxsize=1000)
 
 
 def load_fixture(case_id: str) -> Optional[Dict[str, Any]]:
-    for file in FIXTURES_DIR.glob("*.yaml"):
-        if case_id in file.stem:
-            try:
-                with open(file, "r", encoding="utf-8") as fp:
-                    return yaml.safe_load(fp)
-            except Exception:
-                return None
+    """Loads a replay fixture strictly by exact YAML 'id' or exact filename stem."""
+    if not case_id or not isinstance(case_id, str):
+        return None
+    for file in sorted(FIXTURES_DIR.glob("*.yaml")):
+        try:
+            with open(file, "r", encoding="utf-8") as fp:
+                data = yaml.safe_load(fp)
+                if not isinstance(data, dict):
+                    continue
+                if data.get("id") == case_id or file.stem == case_id:
+                    return data
+        except Exception:
+            continue
     return None
 
 
@@ -70,16 +80,35 @@ async def list_incidents():
 
 
 @app.get("/api/triage/{case_id}/stream")
-async def stream_triage(case_id: str):
-    """Streams real-time multi-agent reasoning steps via Server-Sent Events (SSE)."""
-    fixture = load_fixture(case_id)
-    if not fixture:
-        raise HTTPException(status_code=404, detail=f"Case {case_id} not found")
+async def stream_triage(
+    case_id: str,
+    target_service: str = "checkout-service",
+    trace_id: Optional[str] = None,
+    use_llm: bool = False,
+):
+    """Streams real-time multi-agent reasoning steps via Server-Sent Events (SSE).
+    Supports both replay fixtures (case_id) and live sandbox probing (case_id='__live__').
+    """
+    is_live = case_id == "__live__"
+    if is_live:
+        now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        fixture = {
+            "id": f"live_{datetime.now(timezone.utc).strftime('%H%M%S')}",
+            "alert_text": f"Live Sandbox Triage: {target_service} latency & downstream error inspection.",
+            "incident_timestamp": now_iso,
+            "target_service": target_service,
+            "trace_id": trace_id,
+            "mock_telemetry": None,
+        }
+    else:
+        fixture = load_fixture(case_id)
+        if not fixture:
+            raise HTTPException(status_code=404, detail=f"Case {case_id} not found")
 
     async def event_generator():
         try:
-            yield f"data: {json.dumps({'type': 'init', 'incident_id': case_id, 'alert': fixture['alert_text']})}\n\n"
-            await asyncio.sleep(0.3)
+            yield f"data: {json.dumps({'type': 'init', 'incident_id': fixture['id'], 'alert': fixture['alert_text']})}\n\n"
+            await asyncio.sleep(0.15)
 
             # 1. GraphRAG Prior Knowledge
             graph_rag = TopologyGraphRAG()
@@ -99,23 +128,25 @@ async def stream_triage(case_id: str):
                 for m in matches
             ]
             yield f"data: {json.dumps({'type': 'graph_rag', 'matches': rag_data})}\n\n"
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.15)
 
             # 2. Multi-Agent Reasoning Execution
             yield f"data: {json.dumps({'type': 'supervisor', 'status': 'Decomposing incident into parallel hypotheses'})}\n\n"
-            await asyncio.sleep(0.3)
 
             graph = compile_investigation_graph()
             initial_state = {
-                "incident_id": case_id,
+                "incident_id": fixture["id"],
                 "alert_text": fixture["alert_text"],
                 "incident_timestamp": fixture["incident_timestamp"],
                 "target_service": fixture["target_service"],
+                "trace_id": trace_id or fixture.get("trace_id"),
+                "use_llm": use_llm,
                 "historical_context": rag_data,
                 "simulated_telemetry": fixture.get("mock_telemetry"),
+                "deadline_timestamp": time.monotonic() + settings.RUN_DEADLINE_SECONDS,
                 "crag_iterations": 0,
             }
-            config = {"configurable": {"thread_id": f"sse_{case_id}_{uuid.uuid4().hex[:8]}"}}
+            config = {"configurable": {"thread_id": f"sse_{fixture['id']}_{uuid.uuid4().hex[:8]}"}}
             final_state = await graph.ainvoke(initial_state, config=config)
 
             # 3. Emit Evidence Items
@@ -129,7 +160,6 @@ async def stream_triage(case_id: str):
                 for e in final_state.get("evidence", [])
             ]
             yield f"data: {json.dumps({'type': 'evidence', 'items': evidence_list})}\n\n"
-            await asyncio.sleep(0.3)
 
             # 4. Emit Atomic Claims & Citations
             claims_list = [
@@ -142,13 +172,11 @@ async def stream_triage(case_id: str):
                 for c in final_state.get("structured_claims", [])
             ]
             yield f"data: {json.dumps({'type': 'claims', 'claims': claims_list})}\n\n"
-            await asyncio.sleep(0.3)
 
             # 5. Emit Adversarial Verdict
             adv = final_state.get("adversarial_verdict")
             if adv:
                 yield f"data: {json.dumps({'type': 'adversarial', 'supported': adv.all_claims_supported, 'confidence': adv.confidence, 'critique': adv.critique_hint})}\n\n"
-                await asyncio.sleep(0.3)
 
             # 6. Emit Terminal & Blast Radius
             blast = {
@@ -160,6 +188,7 @@ async def stream_triage(case_id: str):
                 "terminal_status": final_state.get("terminal_status"),
                 "terminal_reason": final_state.get("terminal_reason"),
                 "summary": final_state.get("root_cause_summary"),
+                "brief_markdown": format_incident_brief(final_state, fmt="markdown"),
             }
             yield f"data: {json.dumps({'type': 'terminal', 'data': blast})}\n\n"
         except Exception as err:
@@ -169,19 +198,62 @@ async def stream_triage(case_id: str):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+@app.get("/api/brief/{case_id}")
+async def get_incident_brief(case_id: str, fmt: Literal["markdown", "json"] = "markdown"):
+    """Generates a downloadable Read-Only Incident Brief for a fixture or live checkout sandbox."""
+    if case_id == "__live__":
+        now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        fixture = {
+            "id": f"live_{datetime.now(timezone.utc).strftime('%H%M%S')}",
+            "alert_text": "Live Sandbox Triage: checkout-service telemetry check.",
+            "incident_timestamp": now_iso,
+            "target_service": "checkout-service",
+            "trace_id": None,
+            "mock_telemetry": None,
+        }
+    else:
+        fixture = load_fixture(case_id)
+        if not fixture:
+            raise HTTPException(status_code=404, detail=f"Case {case_id} not found")
+
+    graph = compile_investigation_graph()
+    final_state = await graph.ainvoke(
+        {
+            "incident_id": fixture["id"],
+            "alert_text": fixture["alert_text"],
+            "incident_timestamp": fixture["incident_timestamp"],
+            "target_service": fixture["target_service"],
+            "trace_id": fixture.get("trace_id"),
+            "simulated_telemetry": fixture.get("mock_telemetry"),
+            "deadline_timestamp": time.monotonic() + settings.RUN_DEADLINE_SECONDS,
+            "crag_iterations": 0,
+        },
+        config={"configurable": {"thread_id": f"brief_{fixture['id']}_{uuid.uuid4().hex[:8]}"}},
+    )
+    rendered = format_incident_brief(final_state, fmt=fmt)
+    media = "application/json" if fmt == "json" else "text/markdown"
+    return PlainTextResponse(content=rendered, media_type=media)
+
+
 class ApprovalRequest(BaseModel):
-    decision: str  # "approved" | "rejected"
-    operator_id: str = "operator_sre_01"
+    decision: Literal["approved", "rejected"]
+    operator_id: str = Field(
+        default="operator_sre_01",
+        pattern=r"^[a-zA-Z0-9_\-\.]{2,64}$",
+        description="Validated operator identifier",
+    )
 
 
 @app.post("/api/remediation/{case_id}/approve")
 async def approve_remediation(case_id: str, req: ApprovalRequest):
-    """Idempotently records operator HITL decision."""
+    """Idempotently records validated operator HITL decision."""
+    if not re.fullmatch(r"^[a-zA-Z0-9_\-]{1,64}$", case_id):
+        raise HTTPException(status_code=422, detail="Invalid case_id format; expected alphanumeric/underscore/hyphen identifier.")
     APPROVAL_LEDGER[case_id] = {
         "case_id": case_id,
         "decision": req.decision,
         "operator_id": req.operator_id,
-        "timestamp": "2026-11-24T20:30:00Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     return {"status": "recorded", "ledger": APPROVAL_LEDGER[case_id]}
 
@@ -396,7 +468,23 @@ async def get_dashboard():
             document.getElementById('hitlStatus').innerText = `Decision '${decision.toUpperCase()}' recorded idempotently.`;
         }
 
-        window.onload = function() {
+        window.onload = async function() {
+            try {
+                const resp = await fetch('/api/incidents');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    const sel = document.getElementById('caseSelector');
+                    if (data.incidents && data.incidents.length > 0) {
+                        const opts = data.incidents.map(inc =>
+                            `<option value="${escapeHtml(inc.id)}">${escapeHtml(inc.id)}: ${escapeHtml(inc.title)}</option>`
+                        );
+                        opts.push('<option value="__live__">LIVE SANDBOX: Checkout Telemetry Probe</option>');
+                        sel.innerHTML = opts.join('');
+                        runTriage(data.incidents[0].id);
+                        return;
+                    }
+                }
+            } catch (e) {}
             runTriage('case_01');
         };
     </script>

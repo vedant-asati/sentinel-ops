@@ -1,5 +1,8 @@
+import argparse
 import asyncio
 import os
+import sys
+import time
 import uuid
 import yaml
 from pathlib import Path
@@ -8,11 +11,13 @@ from rich.console import Console
 from rich.table import Table
 
 from benchmarks.baselines.deterministic_rules import DeterministicRuleBaseline
-from benchmarks.baselines.single_pass_llm import SinglePassLLMBaseline
+from benchmarks.baselines.single_pass_llm import SinglePassLLMBaseline, UngroundedHeuristicBaseline
+from sentinel_ops.agents.adversarial import validate_claims_and_citations
 from sentinel_ops.agents.graph import compile_investigation_graph
+from sentinel_ops.agents.llm_planner import run_live_single_pass_gemini
 from sentinel_ops.agents.state import AtomicClaim, EvidenceItem
+from sentinel_ops.analytics.dora import compute_dora_benchmark
 from sentinel_ops.memory.graph_rag import TopologyGraphRAG
-from tests.test_claim_verification import validate_claims_and_citations
 
 console = Console()
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -28,7 +33,7 @@ class SentinelOpsLangGraphAgent:
         self.graph = compile_investigation_graph()
         self.rag = TopologyGraphRAG()
 
-    def diagnose(self, case: Dict[str, Any], resume_thread_id: str | None = None) -> Dict[str, Any]:
+    def diagnose(self, case: Dict[str, Any], resume_thread_id: str | None = None, use_llm: bool = False) -> Dict[str, Any]:
         matches = self.rag.retrieve(
             alert_text=case.get("alert_text", ""),
             target_service=case.get("target_service", "checkout-service"),
@@ -47,21 +52,24 @@ class SentinelOpsLangGraphAgent:
             "trace_id": case.get("trace_id"),
             "historical_context": rag_context,
             "simulated_telemetry": case.get("mock_telemetry"),
+            "use_llm": use_llm,
             "crag_iterations": 0,
         }
         thread_id = resume_thread_id or f"{case.get('id', 'bench')}_{uuid.uuid4().hex[:8]}"
         config = {"configurable": {"thread_id": thread_id}}
+        t0 = time.perf_counter()
         final_state = asyncio.run(self.graph.ainvoke(initial_state, config=config))
+        elapsed_s = time.perf_counter() - t0
 
         diag_svc = "unknown"
         if final_state.get("terminal_status") == "SUPPORTED_DIAGNOSIS":
-            summary = final_state.get("root_cause_summary", "")
-            if "payment-service" in summary:
-                diag_svc = "payment-service"
-            elif "pricing-service" in summary:
-                diag_svc = "pricing-service"
-            elif "cart-service" in summary:
-                diag_svc = "cart-service"
+            claims = final_state.get("structured_claims") or []
+            root_claim_text = " ".join(c.statement for c in claims if getattr(c, "claim_type", None) == "root_cause")
+            source_text = root_claim_text or final_state.get("root_cause_summary", "")
+            for svc in ("payment-service", "pricing-service", "cart-service"):
+                if svc in source_text:
+                    diag_svc = svc
+                    break
 
         return {
             "agent": "sentinel_ops_langgraph",
@@ -75,6 +83,7 @@ class SentinelOpsLangGraphAgent:
             "remediation": final_state.get("remediation_proposal", ""),
             "adversarial_verdict": final_state.get("adversarial_verdict"),
             "thread_id": thread_id,
+            "elapsed_seconds": round(elapsed_s, 4),
         }
 
 
@@ -88,43 +97,56 @@ def load_fixtures() -> List[Dict[str, Any]]:
     return cases
 
 
-def run_benchmark():
+def run_benchmark(live_llm: bool = False) -> int:
     console.print("\n[bold cyan]══════════════════════════════════════════════════════════════════════════[/bold cyan]")
-    console.print("[bold white]Sentinel-Ops Benchmark: 5-Case Replay & Baseline Comparison[/bold white]")
+    mode_label = "Live Gemini 3.5 Flash Lite Neuro-Symbolic Comparison" if live_llm else "Offline Replay & Heuristic Comparison"
+    console.print(f"[bold white]Sentinel-Ops Benchmark: 5-Case {mode_label}[/bold white]")
     console.print("[bold cyan]══════════════════════════════════════════════════════════════════════════[/bold cyan]\n")
 
     cases = load_fixtures()
     console.print(f"Loaded [bold green]{len(cases)}[/bold green] replayable incident cases from [cyan]benchmarks/fixtures/[/cyan]\n")
 
     deterministic_engine = DeterministicRuleBaseline()
-    single_pass_engine = SinglePassLLMBaseline()
+    ungrounded_engine = UngroundedHeuristicBaseline()
     sentinel_agent = SentinelOpsLangGraphAgent()
 
+    baseline_col_title = "Live Gemini Single-Pass" if live_llm else "Ungrounded Heuristic"
     table = Table(title="Incident Replay Comparison Matrix", show_header=True, header_style="bold magenta")
     table.add_column("Case ID", style="cyan", width=10)
     table.add_column("Ground Truth Cause", style="white", width=22)
     table.add_column("Deterministic Rules", style="yellow", width=20)
-    table.add_column("Single-Pass LLM", style="red", width=20)
+    table.add_column(baseline_col_title, style="red", width=22)
     table.add_column("Sentinel-Ops Agent", style="bold green", width=24)
 
     results = {}
+    latencies: List[float] = []
 
     for c in cases:
         c_id = c["id"]
         gt_cause = f"{c['ground_truth']['root_cause_service']} ({c['ground_truth']['mechanism']})"
-        
+
         # Sanitize input: strip ground truth so candidate models evaluate telemetry honestly
         c_input = {k: v for k, v in c.items() if k != "ground_truth"}
-        
-        # Run baselines
+
         det_res = deterministic_engine.diagnose(c_input)
-        sp_res = single_pass_engine.diagnose(c_input)
-        agent_res = sentinel_agent.diagnose(c_input)
+        if live_llm:
+            sp_res = asyncio.run(
+                run_live_single_pass_gemini(
+                    alert_text=c_input.get("alert_text", ""),
+                    target_service=c_input.get("target_service", "checkout-service"),
+                    telemetry_bundle=c_input.get("mock_telemetry") or {},
+                )
+            )
+        else:
+            sp_res = ungrounded_engine.diagnose(c_input)
+
+        agent_res = sentinel_agent.diagnose(c_input, use_llm=live_llm)
+        latencies.append(agent_res.get("elapsed_seconds", 0.0))
         results[c_id] = {"agent": agent_res, "single_pass": sp_res, "deterministic": det_res}
 
         det_str = f"{det_res['diagnosed_root_cause']} [{det_res['terminal_status'][:4]}]"
         sp_str = f"{sp_res['diagnosed_root_cause']} [{sp_res['terminal_status'][:4]}]"
-        
+
         agent_status = agent_res["terminal_status"]
         if agent_status == "SUPPORTED_DIAGNOSIS":
             agent_str = f"{agent_res['diagnosed_root_cause']} (SUPPORTED)"
@@ -160,11 +182,6 @@ def run_benchmark():
     )
     sp_hallucination_pct = (sp_hallucinations / len(abstention_cases) * 100.0) if abstention_cases else 0.0
 
-    # Print Key Insights
-    console.print("\n[bold white]Key Architectural Metrics Demonstrated (Dynamically Evaluated):[/bold white]")
-    console.print(f"  ✔ [green]Root-Cause Precision:[/green] {precision_pct:.1f}% ({correct_diagnoses}/{len(diagnosable_cases)} cases matched ground truth)")
-    console.print(f"  ✔ [green]Correct Abstention Rate:[/green] {abstention_pct:.1f}% ({correct_abstentions}/{len(abstention_cases)} withheld cases safely abstained; Single-Pass LLM hallucinated {sp_hallucination_pct:.1f}%)")
-    # Dynamic citation contract evaluation
     total_claims = 0
     valid_citation_claims = 0
     for c in diagnosable_cases:
@@ -178,8 +195,26 @@ def run_benchmark():
                 valid_citation_claims += len(claims)
 
     citation_pct = (valid_citation_claims / total_claims * 100.0) if total_claims else 100.0
-    console.print(f"  ✔ [green]Citation Contract Support:[/green] {citation_pct:.1f}% of claims cite verified [EV-xxx] observations (Dynamically Verified)")
+    avg_latency_sec = (sum(latencies) / len(latencies)) if latencies else 0.0
+    dora_summary = compute_dora_benchmark(
+        agent_mttr_seconds=max(0.001, avg_latency_sec),
+        citation_support_rate=citation_pct / 100.0,
+        correct_abstention_rate=abstention_pct / 100.0,
+    )
+
+    console.print("\n[bold white]Measured Benchmark Results (Dynamically Evaluated):[/bold white]")
+    console.print(f"  ✔ [green]Root-Cause Precision:[/green] {precision_pct:.1f}% ({correct_diagnoses}/{len(diagnosable_cases)} cases matched ground truth)")
+    console.print(f"  ✔ [green]Correct Abstention Rate:[/green] {abstention_pct:.1f}% ({correct_abstentions}/{len(abstention_cases)} withheld cases safely abstained; {baseline_col_title} guessed wrong {sp_hallucination_pct:.1f}%)")
+    console.print(f"  ✔ [green]Citation Contract Support:[/green] {citation_pct:.1f}% of claims cite verified [EV-xxx] observations")
+    console.print(f"  ✔ [green]Measured Mean Triage Latency:[/green] {avg_latency_sec:.4f}s per case (vs. 2700s manual ref: {dora_summary.acceleration_factor:.0f}x)")
+
+    if precision_pct < 100.0 or abstention_pct < 100.0 or citation_pct < 100.0:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    run_benchmark()
+    parser = argparse.ArgumentParser(description="Sentinel-Ops Replay Benchmark Runner")
+    parser.add_argument("--live-llm", action="store_true", help="Compare live Gemini 3.5 Flash Lite Neuro-Symbolic planner vs unconstrained single-pass Gemini")
+    args = parser.parse_args()
+    sys.exit(run_benchmark(live_llm=args.live_llm))

@@ -4,12 +4,39 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from sentinel_ops.agents.state import EvidenceItem
+from sentinel_ops.core.config import settings
 from sentinel_ops.mcp.prometheus_adapter import PrometheusAdapter
-from sentinel_ops.mcp.tempo_adapter import TempoAdapter
+from sentinel_ops.mcp.tempo_adapter import TempoAdapter, analyze_trace_spans
 from sentinel_ops.security.sanitizer import wrap_telemetry, defang_telemetry_tags
 from sentinel_ops.security.redact import scrub_credentials
 
 logger = logging.getLogger(__name__)
+
+_PROM_ADAPTER: Optional[PrometheusAdapter] = None
+_TEMPO_ADAPTER: Optional[TempoAdapter] = None
+
+
+def get_prometheus_adapter() -> PrometheusAdapter:
+    global _PROM_ADAPTER
+    if _PROM_ADAPTER is None:
+        _PROM_ADAPTER = PrometheusAdapter()
+    return _PROM_ADAPTER
+
+
+def get_tempo_adapter() -> TempoAdapter:
+    global _TEMPO_ADAPTER
+    if _TEMPO_ADAPTER is None:
+        _TEMPO_ADAPTER = TempoAdapter()
+    return _TEMPO_ADAPTER
+
+
+def _compute_remaining_timeout(deadline_ts: Optional[float]) -> Optional[float]:
+    if deadline_ts is None:
+        return None
+    rem = deadline_ts - time.monotonic()
+    if rem <= 0.0:
+        return 0.0
+    return max(0.001, min(settings.PER_QUERY_TIMEOUT_SECONDS, rem))
 
 
 def interpret_metric(
@@ -211,9 +238,25 @@ async def metrics_specialist_node(payload: Dict[str, Any]) -> Dict[str, List[Evi
         )
         return {"evidence": [item]}
 
-    # Live Prometheus querying
-    adapter = PrometheusAdapter()
-    res = await adapter.query_metric(service=service, metric_type=metric_type, window=window)
+    # Live Prometheus querying via pooled adapter constrained by run deadline
+    adapter = get_prometheus_adapter()
+    timeout_budget = _compute_remaining_timeout(deadline_ts)
+    if timeout_budget == 0.0:
+        return {"evidence": [EvidenceItem(
+            id=evidence_id,
+            backend_source="prometheus",
+            query_string=f"{service}_{metric_type}",
+            query_params={"service": service, "metric_type": metric_type},
+            observation_window=window,
+            sample_or_span_ref=metric_type,
+            finding=f"Query aborted: deadline exceeded before live execution ({service} {metric_type})",
+            raw_payload="",
+            status="TOOL_FAILURE",
+        )]}
+
+    res = await adapter.query_metric(
+        service=service, metric_type=metric_type, window=window, timeout_override=timeout_budget
+    )
     status = res.get("status", "EMPTY")
     promql = res.get("promql", f"{service}_{metric_type}")
 
@@ -226,15 +269,19 @@ async def metrics_specialist_node(payload: Dict[str, Any]) -> Dict[str, List[Evi
 
         cap = None
         if metric_type == "db_pool_active":
-            cap_res = await adapter.query_metric(service=service, metric_type="db_pool_size", window=window)
-            if cap_res.get("status") == "SUCCESS" and cap_res.get("result"):
-                sz_series = cap_res["result"]
-                sz_vals = sz_series[0].get("values") or [sz_series[0].get("value")]
-                if sz_vals:
-                    try:
-                        cap = float(sz_vals[-1][1])
-                    except (ValueError, TypeError):
-                        cap = None
+            cap_timeout = _compute_remaining_timeout(deadline_ts)
+            if cap_timeout != 0.0:
+                cap_res = await adapter.query_metric(
+                    service=service, metric_type="db_pool_size", window=window, timeout_override=cap_timeout
+                )
+                if cap_res.get("status") == "SUCCESS" and cap_res.get("result"):
+                    sz_series = cap_res["result"]
+                    sz_vals = sz_series[0].get("values") or [sz_series[0].get("value")]
+                    if sz_vals:
+                        try:
+                            cap = float(sz_vals[-1][1])
+                        except (ValueError, TypeError):
+                            cap = None
 
         status, finding, raw_payload = interpret_metric(service, metric_type, values, capacity=cap)
     elif status == "EMPTY":
@@ -378,24 +425,9 @@ async def trace_specialist_node(payload: Dict[str, Any]) -> Dict[str, List[Evide
         if status == "SUCCESS":
             spans = selected_trace_data.get("spans", [])
             if spans:
-                # Calculate exclusive bottleneck from span hierarchy
-                children_time = {}
-                for s in spans:
-                    p = s.get("parent_span_id") or s.get("parentSpanId")
-                    if p:
-                        children_time[p] = children_time.get(p, 0.0) + s.get("duration_ms", 0.0)
-
-                max_exclusive = -1.0
-                bottleneck_svc = selected_trace_data.get("bottleneck_service", "unknown")
-                dur = selected_trace_data.get("bottleneck_duration_ms", 0.0)
-                for s in spans:
-                    s_id = s.get("span_id") or s.get("spanId")
-                    s_dur = s.get("duration_ms", 0.0)
-                    excl = max(0.0, s_dur - children_time.get(s_id, 0.0))
-                    if excl > max_exclusive:
-                        max_exclusive = excl
-                        bottleneck_svc = s.get("service", bottleneck_svc)
-                        dur = excl
+                analysis = analyze_trace_spans(spans, selected_trace_id)
+                bottleneck_svc = analysis["bottleneck_service"] or selected_trace_data.get("bottleneck_service", "unknown")
+                dur = analysis["bottleneck_duration_ms"]
                 finding = f"Distributed trace {selected_trace_id} waterfall: bottleneck in {bottleneck_svc} ({dur:.1f}ms exclusive)"
             else:
                 bottleneck = selected_trace_data.get("bottleneck_service", "unknown")
@@ -423,26 +455,75 @@ async def trace_specialist_node(payload: Dict[str, Any]) -> Dict[str, List[Evide
         )
         return {"evidence": [item]}
 
-    # Live Tempo querying
-    adapter = TempoAdapter()
-    res = await adapter.get_trace_waterfall(trace_id="0123456789abcdef0123456789abcdef")
-    status = res.get("status", "EMPTY")
+    # Live Tempo querying via pooled adapter constrained by run deadline
+    adapter = get_tempo_adapter()
+    timeout_budget = _compute_remaining_timeout(deadline_ts)
+    if timeout_budget == 0.0:
+        return {"evidence": [EvidenceItem(
+            id=evidence_id,
+            backend_source="tempo",
+            query_string=f"trace_{target_service}",
+            query_params={"target_service": target_service},
+            observation_window=window,
+            sample_or_span_ref="span_waterfall",
+            finding=f"Trace collection aborted: deadline exceeded before live execution ({target_service})",
+            raw_payload="",
+            status="TOOL_FAILURE",
+        )]}
 
-    if status == "SUCCESS":
-        finding = f"Tempo trace analysis isolated bottleneck in {res.get('bottleneck_service')} ({res.get('bottleneck_duration_ms')}ms)"
+    resolved_trace_id = payload.get("trace_id")
+    if not resolved_trace_id:
+        resolved_trace_id = await adapter.search_traces(
+            service=target_service,
+            start_iso=window[0],
+            end_iso=window[1],
+            timeout_override=timeout_budget,
+        )
+
+    if not resolved_trace_id:
+        return {"evidence": [EvidenceItem(
+            id=evidence_id,
+            backend_source="tempo",
+            query_string=f"search:{target_service}",
+            query_params={"target_service": target_service},
+            observation_window=window,
+            sample_or_span_ref="span_waterfall",
+            finding=f"No traces found for {target_service} in Tempo incident window",
+            raw_payload="",
+            status="EMPTY",
+        )]}
+
+    timeout_budget = _compute_remaining_timeout(deadline_ts)
+    res = await adapter.get_trace_waterfall(trace_id=resolved_trace_id, timeout_override=timeout_budget)
+    status = res.get("status", "EMPTY")
+    spans = res.get("spans", [])
+    timeout_span = next((s for s in spans if s.get("error") == "TimeoutError"), None)
+
+    if status == "SUCCESS" and timeout_span:
+        dep_svc = timeout_span.get("service")
+        op_name = timeout_span.get("name")
+        dur = timeout_span.get("duration_ms", 0.0)
+        finding = f"Distributed trace {resolved_trace_id} waterfall: TimeoutError in {dep_svc} on {op_name} ({dur:.0f}ms)"
         raw_payload = res.get("formatted", "")
+        query_params = {"target_service": target_service, "trace_id": resolved_trace_id, "service": dep_svc, "operation": op_name}
+    elif status == "SUCCESS":
+        finding = f"Tempo trace analysis isolated bottleneck in {res.get('bottleneck_service')} ({res.get('bottleneck_duration_ms')}ms exclusive)"
+        raw_payload = res.get("formatted", "")
+        query_params = {"target_service": target_service, "trace_id": resolved_trace_id}
     elif status == "EMPTY":
         finding = f"No traces found for {target_service} in Tempo"
         raw_payload = ""
+        query_params = {"target_service": target_service, "trace_id": resolved_trace_id}
     else:
         finding = f"Tempo tool failure: {res.get('error')}"
         raw_payload = ""
+        query_params = {"target_service": target_service, "trace_id": resolved_trace_id}
 
     item = EvidenceItem(
         id=evidence_id,
         backend_source="tempo",
-        query_string="chk-root-trace",
-        query_params={"target_service": target_service},
+        query_string=resolved_trace_id,
+        query_params=query_params,
         observation_window=window,
         sample_or_span_ref="span_waterfall",
         finding=finding,

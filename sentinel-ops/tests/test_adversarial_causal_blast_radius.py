@@ -61,20 +61,16 @@ class TestBlastRadiusVulnerabilities:
         assert res_gateway["blast_radius_score"] < res_postgres["blast_radius_score"]
 
     def test_cascading_downstream_failure_blindness(self):
-        """Vulnerability: calculate_reverse_blast_radius only inspects ancestors (callers),
-
-        ignoring downstream descendants (callees). If checkout-service fails and cascades down
-        to cart, pricing, payment, none of these affected systems are accounted for.
-        """
+        """INVARIANT: Ingress restart accounts for downstream reachability while separating upstream callers."""
         graph = build_service_graph()
-        # checkout-service has 3 direct downstream dependents and 1 transitive (postgres-db)
         descendants = nx.descendants(graph, "checkout-service")
         assert len(descendants) == 4
 
-        # But reverse blast radius reports ZERO affected systems for checkout-service!
         res = calculate_reverse_blast_radius("checkout-service", action="restart")
         assert len(res["affected_callers"]) == 0
-        assert not set(res["affected_callers"]).intersection(descendants)
+        assert len(res["downstream_dependencies"]) == 4
+        assert res["blast_radius_score"] >= 0.45
+        assert res["blast_radius_level"] in ("Medium", "High")
 
     def test_circular_dependency_symmetry_deadlock(self, monkeypatch):
         """Vulnerability: In a circular dependency A -> B -> C -> A,

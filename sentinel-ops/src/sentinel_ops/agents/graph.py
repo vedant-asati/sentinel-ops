@@ -97,6 +97,7 @@ def build_investigation_graph() -> StateGraph:
             "blast_radius": "blast_radius",
             "synthesizer": "synthesizer",
             "insufficient_evidence": "insufficient_evidence",
+            "operational_failure": "operational_failure",
         },
     )
 

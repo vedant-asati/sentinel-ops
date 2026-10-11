@@ -32,3 +32,14 @@ def test_approve_remediation(client: TestClient):
     data = resp.json()
     assert data["status"] == "recorded"
     assert data["ledger"]["decision"] == "approved"
+
+
+def test_get_incident_brief_endpoint(client: TestClient):
+    resp_md = client.get("/api/brief/case_01?fmt=markdown")
+    assert resp_md.status_code == 200
+    assert "# On-Call Incident Brief:" in resp_md.text
+    assert "[EV-" in resp_md.text
+
+    resp_json = client.get("/api/brief/case_03?fmt=json")
+    assert resp_json.status_code == 200
+    assert "INSUFFICIENT_EVIDENCE" in resp_json.text

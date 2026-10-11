@@ -82,9 +82,9 @@ def test_evidence_reducer_conflicting_success_loss():
 
 
 def test_evidence_item_unfrozen_mutability():
-    """VULNERABILITY: EvidenceItem is not frozen, permitting direct in-place state corruption.
-    Any node or concurrent thread can mutate evidence fields in place without immutability guarantees.
-    """
+    """INVARIANT: EvidenceItem is immutable (frozen=True), preventing in-place corruption."""
+    from pydantic import ValidationError
+
     item = EvidenceItem(
         id="EV-001",
         backend_source="prometheus",
@@ -96,11 +96,12 @@ def test_evidence_item_unfrozen_mutability():
         raw_payload="payload",
         status="SUCCESS",
     )
-    # Direct field mutation succeeds because frozen=True is not set
-    item.finding = "Tampered / Corrupted Finding"
-    item.status = "EMPTY"
-    assert item.finding == "Tampered / Corrupted Finding"
-    assert item.status == "EMPTY"
+    with pytest.raises(ValidationError):
+        item.finding = "Tampered / Corrupted Finding"
+    with pytest.raises(ValidationError):
+        item.status = "EMPTY"
+    assert item.finding == "Original finding"
+    assert item.status == "SUCCESS"
 
 
 def test_deadline_tracker_zero_timeout_socket_vulnerability():

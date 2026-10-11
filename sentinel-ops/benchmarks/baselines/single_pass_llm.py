@@ -1,8 +1,8 @@
 from typing import Any, Dict
 
 
-class SinglePassLLMBaseline:
-    """Simulates a single-pass ungrounded LLM that receives an uncurated telemetry bundle."""
+class UngroundedHeuristicBaseline:
+    """Offline heuristic baseline simulating an ungrounded single-pass comparator without LLM API calls."""
 
     def diagnose(self, case: Dict[str, Any]) -> Dict[str, Any]:
         mock_telem = case.get("mock_telemetry") or {}
@@ -67,11 +67,15 @@ class SinglePassLLMBaseline:
                 }
 
         # 5. Inconclusive or withheld telemetry:
-        # Crucially: Single-pass LLM DOES NOT abstain. It hallucinates a guess on checkout-service!
+        # Crucially: Ungrounded comparator DOES NOT abstain. It guesses checkout-service!
         return {
-            "baseline": "single_pass_llm",
+            "baseline": "ungrounded_heuristic",
             "diagnosed_root_cause": "checkout-service",
             "mechanism": "thread_pool_starvation",
             "terminal_status": "SUPPORTED_DIAGNOSIS",
             "unsupported_claims_count": 3,
         }
+
+
+# Backwards-compatible alias for legacy imports
+SinglePassLLMBaseline = UngroundedHeuristicBaseline

@@ -57,8 +57,8 @@ PRESEEDED_POSTMORTEMS: List[PostmortemIncident] = [
 
 
 def tokenize(text: str) -> List[str]:
-    """Extract lowercase alpha tokens from text."""
-    return re.findall(r"\b[a-zA-Z0-9_\-]{2,}\b", text.lower())
+    """Extract lowercase alphanumeric tokens (including single-character IDs) from text."""
+    return re.findall(r"\b[a-zA-Z0-9_\-]+\b", text.lower())
 
 
 def compute_text_cosine_similarity(text1: str, text2: str) -> float:
@@ -106,7 +106,7 @@ class TopologyGraphRAG:
         self.tau_days = tau_days
 
     def calculate_graph_distance(self, svc_alert: str, svc_postmortem: str) -> float:
-        """Calculates causal / shortest path distance between two services in the graph."""
+        """Calculates causal directed distance between alert origin and postmortem service."""
         if svc_alert == svc_postmortem:
             return 0.0
         if svc_alert in self.graph and svc_postmortem in self.graph:
@@ -114,24 +114,23 @@ class TopologyGraphRAG:
                 return float(nx.shortest_path_length(self.graph, svc_alert, svc_postmortem))
             elif nx.has_path(self.graph, svc_postmortem, svc_alert):
                 return float(nx.shortest_path_length(self.graph, svc_postmortem, svc_alert))
-            else:
-                undirected_g = self.graph.to_undirected()
-                try:
-                    return float(nx.shortest_path_length(undirected_g, svc_alert, svc_postmortem))
-                except nx.NetworkXNoPath:
-                    return float("inf")
         return float("inf")
 
     def calculate_recency_decay(self, incident_time_iso: str, postmortem_time_iso: str) -> float:
-        """Calculates exponential decay factor exp(-delta_days / tau_days)."""
+        """Calculates exponential decay factor exp(-delta_days / tau_days) with UTC normalization."""
+        if self.tau_days <= 0:
+            raise ValueError(f"tau_days must be positive, got {self.tau_days}")
         try:
-            if self.tau_days <= 0:
-                return 0.5
             t_now = datetime.fromisoformat(incident_time_iso.replace("Z", "+00:00"))
             t_pm = datetime.fromisoformat(postmortem_time_iso.replace("Z", "+00:00"))
+            if t_now.tzinfo is None:
+                t_now = t_now.replace(tzinfo=timezone.utc)
+            if t_pm.tzinfo is None:
+                t_pm = t_pm.replace(tzinfo=timezone.utc)
             diff_seconds = (t_now - t_pm).total_seconds()
             if diff_seconds < 0:
-                return 1.0
+                # Penalize postmortem dated in the future relative to incident (clock skew / invalid)
+                return 0.0
             delta_days = diff_seconds / 86400.0
             return math.exp(-delta_days / self.tau_days)
         except Exception:

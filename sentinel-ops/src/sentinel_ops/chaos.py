@@ -88,7 +88,15 @@ def main():
     # inject command
     inject_parser = subparsers.add_parser("inject", help="Inject chaos fault into service")
     inject_parser.add_argument("service", choices=list(SERVICE_PORTS.keys()), help="Target microservice")
-    inject_parser.add_argument("fault", choices=["db_pool_exhaustion", "cpu_saturation", "recover"], help="Fault scenario")
+    inject_parser.add_argument(
+        "fault",
+        choices=["db_pool_exhaustion", "cpu_saturation", "upstream_connect_timeout", "memory_leak", "recover"],
+        help="Fault scenario",
+    )
+
+    # checkout traffic generator
+    checkout_parser = subparsers.add_parser("traffic", help="Send live /checkout request through sandbox graph")
+    checkout_parser.add_argument("--count", type=int, default=3, help="Number of checkout transactions to run")
 
     # status command
     subparsers.add_parser("status", help="Show sandbox microservices status")
@@ -103,6 +111,17 @@ def main():
         print_status()
     elif args.command == "recover":
         recover_all()
+    elif args.command == "traffic":
+        last_trace = None
+        for i in range(args.count):
+            try:
+                r = httpx.get(f"http://localhost:{SERVICE_PORTS['checkout-service']}/checkout", timeout=3.0)
+                last_trace = r.headers.get("X-Trace-Id") or r.json().get("trace_id")
+                console.print(f"  [{i+1}/{args.count}] HTTP {r.status_code} | X-Trace-Id={last_trace}")
+            except Exception as e:
+                console.print(f"  [red]Traffic call error: {e}[/red]")
+        if last_trace:
+            console.print(f"[bold cyan]Latest Trace ID:[/bold cyan] {last_trace}")
     else:
         parser.print_help()
 

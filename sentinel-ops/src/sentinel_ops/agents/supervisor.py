@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Tuple
 from langgraph.types import Send
 from sentinel_ops.agents.state import InvestigationState
 from sentinel_ops.agents.blast_radius import build_service_graph
+from sentinel_ops.agents.llm_planner import plan_probes_with_llm
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +25,11 @@ def compute_incident_window(incident_timestamp: str, before_minutes: int = 2, af
     )
 
 
-def supervisor_node(state: InvestigationState) -> Dict[str, Any]:
+async def supervisor_node(state: InvestigationState) -> Dict[str, Any]:
     """Supervisor Agent: decomposes incoming incident alert into competing hypotheses
 
-    using dependency topology, alert narrative, and historical GraphRAG context.
+    using dependency topology, alert narrative, historical GraphRAG context,
+    and optional bounded Gemini query planning (--use-llm).
     """
     logger.info("Supervisor analyzing incident: %s on target service: %s", state.incident_id, state.target_service)
 
@@ -42,6 +44,24 @@ def supervisor_node(state: InvestigationState) -> Dict[str, Any]:
     # 2. Formulate topology-driven competing hypotheses based on target service dependencies
     service_graph = build_service_graph()
     dependencies = list(service_graph.successors(state.target_service)) if state.target_service in service_graph else [state.target_service]
+
+    planned_probes: List[Dict[str, str]] = []
+    if state.use_llm:
+        llm_plan = await plan_probes_with_llm(
+            alert_text=state.alert_text,
+            target_service=state.target_service,
+            historical_context=state.historical_context,
+            dependencies=dependencies,
+            deadline_timestamp=state.deadline_timestamp,
+        )
+        if llm_plan:
+            for h in llm_plan.hypotheses:
+                if h not in hypotheses:
+                    hypotheses.append(h)
+            planned_probes = [
+                {"service": p.service, "metric_type": p.metric_type, "rationale": p.rationale}
+                for p in llm_plan.probes
+            ]
 
     for dep in dependencies:
         if dep == "cart-service":
@@ -62,6 +82,7 @@ def supervisor_node(state: InvestigationState) -> Dict[str, Any]:
 
     return {
         "hypotheses": hypotheses,
+        "llm_planned_probes": planned_probes,
     }
 
 
@@ -112,10 +133,34 @@ def route_supervisor_to_specialists(state: InvestigationState) -> List[Send]:
         "cart-service": ["memory_usage", "container_restarts", "error_rate"],
     }
 
-    # Dispatch systematic telemetry probes for all dependencies without peeking at test fixtures
+    # Dispatch LLM-planned probes first when enabled, then systemic topology dependencies without fixture peeking
+    dispatched: set[tuple[str, str]] = set()
+    for probe in state.llm_planned_probes:
+        svc = probe.get("service", "")
+        m_type = probe.get("metric_type", "")
+        if svc and m_type and (svc, m_type) not in dispatched:
+            dispatched.add((svc, m_type))
+            tasks.append(
+                Send(
+                    "metrics_specialist",
+                    {
+                        "incident_id": state.incident_id,
+                        "service": svc,
+                        "metric_type": m_type,
+                        "observation_window": window,
+                        "incident_timestamp": state.incident_timestamp,
+                        "simulated_telemetry": sim_telem,
+                        "deadline_timestamp": state.deadline_timestamp,
+                    },
+                )
+            )
+
     for dep in dependencies:
         m_types = SERVICE_METRICS.get(dep, ["error_rate", "latency_p95"])
         for m_type in m_types:
+            if (dep, m_type) in dispatched:
+                continue
+            dispatched.add((dep, m_type))
             tasks.append(
                 Send(
                     "metrics_specialist",

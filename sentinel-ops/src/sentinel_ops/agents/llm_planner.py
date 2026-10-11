@@ -1,0 +1,195 @@
+"""Bounded Neuro-Symbolic LLM Query Planner & Incident Brief Narrative Generator.
+
+Respects Gemini free-tier quota limits for gemini-3.5-flash-lite (15 RPM / 500 RPD / 250K TPM)
+and fails safely back to symbolic defaults when rate-limited, timed out, or unconfigured.
+"""
+
+import asyncio
+import json
+import logging
+import time
+from typing import Any, Dict, List, Literal, Optional
+from pydantic import BaseModel, Field
+
+from sentinel_ops.core.config import settings
+from sentinel_ops.core.llm import get_chat_model
+
+logger = logging.getLogger(__name__)
+
+
+class AsyncRateLimiter:
+    """Simple async interval limiter preventing 15 RPM quota exhaustion."""
+
+    def __init__(self, min_interval_sec: float = 4.2):
+        self.min_interval_sec = min_interval_sec
+        self._last_call: float = 0.0
+        self._lock: Optional[asyncio.Lock] = None
+
+    async def acquire(self) -> None:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            now = time.monotonic()
+            wait = self.min_interval_sec - (now - self._last_call)
+            if wait > 0 and self._last_call > 0:
+                await asyncio.sleep(wait)
+            self._last_call = time.monotonic()
+
+
+_GEMINI_RATE_LIMITER = AsyncRateLimiter(min_interval_sec=4.2)
+
+
+class PlannedMetricProbe(BaseModel):
+    service: Literal["checkout-service", "cart-service", "pricing-service", "payment-service"]
+    metric_type: Literal[
+        "error_rate",
+        "latency_p95",
+        "db_pool_active",
+        "db_pool_size",
+        "db_pool_acquire_timeouts_total",
+        "upstream_connect_timeouts_total",
+        "cpu_saturation",
+        "memory_usage",
+        "container_restarts",
+    ]
+    rationale: str = Field(description="Why this signal discriminates competing hypotheses")
+
+
+class LLMInvestigationPlan(BaseModel):
+    hypotheses: List[str] = Field(max_length=5)
+    probes: List[PlannedMetricProbe] = Field(max_length=6)
+
+
+class SinglePassDiagnosisSchema(BaseModel):
+    diagnosed_root_cause: str
+    mechanism: str
+    status: Literal["SUPPORTED_DIAGNOSIS", "INSUFFICIENT_EVIDENCE"]
+    rationale: str
+
+
+class LLMBriefNarrative(BaseModel):
+    executive_summary: str = Field(description="Concise 2-sentence summary citing only verified [EV-xxx] IDs")
+    prioritized_next_check: str = Field(description="Most discriminating follow-up check for the on-call operator")
+
+
+async def refine_brief_with_llm(
+    alert_text: str,
+    target_service: str,
+    verified_claims: List[Dict[str, Any]],
+    evidence: List[Dict[str, Any]],
+    next_checks: List[str],
+    deadline_timestamp: Optional[float] = None,
+) -> Optional[LLMBriefNarrative]:
+    """Synthesizes an operator-friendly Incident Brief strictly constrained to verified citations."""
+    if not settings.GEMINI_API_KEY or not verified_claims:
+        return None
+
+    remaining = (deadline_timestamp - time.monotonic()) if deadline_timestamp else settings.PER_LLM_TIMEOUT_SECONDS
+    if remaining <= 1.0:
+        return None
+
+    await _GEMINI_RATE_LIMITER.acquire()
+    remaining = (deadline_timestamp - time.monotonic()) if deadline_timestamp else settings.PER_LLM_TIMEOUT_SECONDS
+    if remaining <= 1.0:
+        return None
+
+    prompt = (
+        f"Summarize this verified SRE diagnosis for the on-call engineer on '{target_service}'.\n"
+        f"Alert: {alert_text}\n"
+        f"Verified Claims: {json.dumps(verified_claims)[:2000]}\n"
+        f"Verified Evidence Items: {json.dumps([{'id': e.get('id'), 'finding': e.get('finding')} for e in evidence if e.get('status') == 'SUCCESS'])[:2500]}\n"
+        f"Candidate Next Checks: {json.dumps(next_checks)}\n\n"
+        "Rule: Only reference metrics, services, and [EV-xxx] IDs explicitly present above."
+    )
+    try:
+        llm = get_chat_model(role="synthesizer")
+        structured = llm.with_structured_output(LLMBriefNarrative)
+        timeout = min(settings.PER_LLM_TIMEOUT_SECONDS, max(1.0, remaining))
+        return await asyncio.wait_for(structured.ainvoke(prompt), timeout=timeout)
+    except Exception as exc:
+        logger.warning("LLM brief narrative refinement unavailable (%s); keeping deterministic summary.", exc)
+        return None
+
+
+async def plan_probes_with_llm(
+    alert_text: str,
+    target_service: str,
+    historical_context: List[Dict[str, Any]],
+    dependencies: List[str],
+    deadline_timestamp: Optional[float] = None,
+) -> Optional[LLMInvestigationPlan]:
+    """Uses Gemini (gemini-3.5-flash-lite) to prioritize competing hypotheses and metric probes."""
+    if not settings.GEMINI_API_KEY:
+        return None
+
+    remaining = (deadline_timestamp - time.monotonic()) if deadline_timestamp else settings.PER_LLM_TIMEOUT_SECONDS
+    if remaining <= 1.0:
+        return None
+
+    await _GEMINI_RATE_LIMITER.acquire()
+    remaining = (deadline_timestamp - time.monotonic()) if deadline_timestamp else settings.PER_LLM_TIMEOUT_SECONDS
+    if remaining <= 1.0:
+        return None
+
+    prompt = (
+        f"You are an SRE Incident Investigation Planner.\n"
+        f"Alert on '{target_service}': {alert_text}\n"
+        f"Direct dependencies: {dependencies}\n"
+        f"GraphRAG historical precedents: {json.dumps(historical_context[:2])}\n\n"
+        "Output at most 4 competing hypotheses and up to 6 priority metric probes "
+        "that best discriminate between pool exhaustion, RPC connect timeouts, CPU latency, and memory OOM."
+    )
+
+    try:
+        llm = get_chat_model(role="supervisor")
+        structured = llm.with_structured_output(LLMInvestigationPlan)
+        timeout = min(settings.PER_LLM_TIMEOUT_SECONDS, max(1.0, remaining))
+        result = await asyncio.wait_for(structured.ainvoke(prompt), timeout=timeout)
+        return result
+    except Exception as exc:
+        logger.warning("LLM query planner unavailable (%s); using deterministic topology fallback.", exc)
+        return None
+
+
+async def run_live_single_pass_gemini(
+    alert_text: str,
+    target_service: str,
+    telemetry_bundle: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Executes an actual unconstrained single-pass Gemini prompt for honest benchmark comparison."""
+    if not settings.GEMINI_API_KEY:
+        return {
+            "baseline": "live_single_pass_gemini",
+            "diagnosed_root_cause": "unavailable",
+            "mechanism": "no_api_key",
+            "terminal_status": "OPERATIONAL_FAILURE",
+        }
+
+    await _GEMINI_RATE_LIMITER.acquire()
+    prompt = (
+        f"Alert on {target_service}: {alert_text}\n"
+        f"Telemetry snapshot: {json.dumps(telemetry_bundle)[:6000]}\n\n"
+        "Diagnose the most likely root cause service and mechanism, or abstain as INSUFFICIENT_EVIDENCE if signals are missing."
+    )
+    try:
+        llm = get_chat_model(role="supervisor")
+        structured = llm.with_structured_output(SinglePassDiagnosisSchema)
+        res: SinglePassDiagnosisSchema = await asyncio.wait_for(
+            structured.ainvoke(prompt),
+            timeout=settings.PER_LLM_TIMEOUT_SECONDS,
+        )
+        return {
+            "baseline": "live_single_pass_gemini",
+            "diagnosed_root_cause": res.diagnosed_root_cause,
+            "mechanism": res.mechanism,
+            "terminal_status": res.status,
+            "rationale": res.rationale,
+        }
+    except Exception as exc:
+        logger.warning("Live single-pass Gemini evaluation failed: %s", exc)
+        return {
+            "baseline": "live_single_pass_gemini",
+            "diagnosed_root_cause": "error",
+            "mechanism": str(exc),
+            "terminal_status": "OPERATIONAL_FAILURE",
+        }

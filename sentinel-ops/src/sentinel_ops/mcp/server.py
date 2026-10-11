@@ -112,7 +112,20 @@ def list_tools() -> List[Dict[str, Any]]:
                 "type": "object",
                 "properties": {
                     "service": {"type": "string", "enum": ["checkout-service", "cart-service", "pricing-service", "payment-service"]},
-                    "metric_type": {"type": "string", "enum": ["error_rate", "latency_p95", "db_pool_active", "db_pool_size", "cpu_saturation"]},
+                    "metric_type": {
+                        "type": "string",
+                        "enum": [
+                            "error_rate",
+                            "latency_p95",
+                            "db_pool_active",
+                            "db_pool_size",
+                            "db_pool_acquire_timeouts_total",
+                            "upstream_connect_timeouts_total",
+                            "cpu_saturation",
+                            "memory_usage",
+                            "container_restarts",
+                        ],
+                    },
                     "start_iso": {"type": "string"},
                     "end_iso": {"type": "string"},
                 },

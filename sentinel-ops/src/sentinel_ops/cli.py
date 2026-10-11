@@ -1,7 +1,9 @@
 import argparse
 import asyncio
 from datetime import datetime, timezone
+import signal
 import sys
+import time
 import uuid
 import yaml
 from pathlib import Path
@@ -13,6 +15,8 @@ from rich.prompt import Confirm
 
 from sentinel_ops.agents.graph import compile_investigation_graph
 from sentinel_ops.agents.state import AtomicClaim, EvidenceItem
+from sentinel_ops.agents.synthesizer import format_incident_brief
+from sentinel_ops.core.config import settings
 from sentinel_ops.dpo.trajectory_logger import DPOTrajectoryLogger
 from sentinel_ops.memory.graph_rag import TopologyGraphRAG
 
@@ -21,11 +25,17 @@ FIXTURES_DIR = Path(__file__).resolve().parents[2] / "benchmarks" / "fixtures"
 
 
 def load_fixture(case_id: str) -> Optional[Dict[str, Any]]:
-    """Loads a replay fixture by case ID (e.g., case_01)."""
-    for file in FIXTURES_DIR.glob("*.yaml"):
-        if case_id in file.stem:
+    """Loads a replay fixture strictly by exact YAML 'id' or exact filename stem."""
+    if not case_id or not isinstance(case_id, str):
+        return None
+    for file in sorted(FIXTURES_DIR.glob("*.yaml")):
+        try:
             with open(file, "r", encoding="utf-8") as fp:
-                return yaml.safe_load(fp)
+                data = yaml.safe_load(fp)
+                if isinstance(data, dict) and (data.get("id") == case_id or file.stem == case_id):
+                    return data
+        except Exception:
+            continue
     return None
 
 
@@ -34,6 +44,10 @@ def run_triage(
     live: bool = False,
     target_service: Optional[str] = None,
     alert_text: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    use_llm: bool = False,
+    export_brief: Optional[str] = None,
+    brief_format: str = "markdown",
     auto_approve: bool = False,
     export_dpo: bool = True,
 ) -> Dict[str, Any]:
@@ -56,6 +70,7 @@ def run_triage(
             alert_text = fixture["alert_text"].strip()
             incident_timestamp = fixture["incident_timestamp"]
             target_service = fixture["target_service"]
+            trace_id = trace_id or fixture.get("trace_id")
             mock_telemetry = fixture.get("mock_telemetry")
         else:
             incident_id = "default_case"
@@ -118,14 +133,24 @@ def run_triage(
             "alert_text": alert_text,
             "incident_timestamp": incident_timestamp,
             "target_service": target_service,
+            "trace_id": trace_id,
+            "use_llm": use_llm,
             "historical_context": rag_context,
             "simulated_telemetry": mock_telemetry,
+            "deadline_timestamp": time.monotonic() + settings.RUN_DEADLINE_SECONDS,
             "crag_iterations": 0,
         }
         config = {"configurable": {"thread_id": f"cli_{incident_id}_{uuid.uuid4().hex[:8]}"}}
         final_state = asyncio.run(graph.ainvoke(initial_state, config=config))
 
     terminal_status = final_state.get("terminal_status", "OPERATIONAL_FAILURE")
+
+    if export_brief:
+        brief_path = Path(export_brief)
+        brief_path.parent.mkdir(parents=True, exist_ok=True)
+        brief_text = format_incident_brief(final_state, fmt=brief_format)
+        brief_path.write_text(brief_text, encoding="utf-8")
+        console.print(f"[bold cyan]Incident Brief exported to:[/bold cyan] {brief_path}\n")
 
     # Step 4: Display Evidence Ledger
     console.print("\n[bold white]3. Telemetry Evidence Ledger (Sanitized & Redacted):[/bold white]")
@@ -282,23 +307,48 @@ def run_triage(
     return final_state
 
 
-def main():
+def main() -> int:
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
     parser = argparse.ArgumentParser(description="Sentinel-Ops AI SRE Investigation CLI")
-    parser.add_argument("--case-id", default="case_01", choices=["case_01", "case_02", "case_03", "case_04", "case_05"], help="Replay case ID")
+    parser.add_argument("--case-id", default=None, choices=["case_01", "case_02", "case_03", "case_04", "case_05"], help="Replay case ID (cannot be combined with --live)")
     parser.add_argument("--live", action="store_true", help="Execute triage against live Prometheus/Tempo endpoints instead of replay fixtures")
+    parser.add_argument("--use-llm", action="store_true", help="Enable bounded Gemini 3.5 Flash Lite Neuro-Symbolic query planning")
     parser.add_argument("--target-service", default="checkout-service", help="Target service for live investigation")
+    parser.add_argument("--trace-id", default=None, help="Explicit distributed trace ID to inspect")
+    parser.add_argument("--export-brief", default=None, help="Write Read-Only Incident Brief to Markdown or JSON file")
+    parser.add_argument("--brief-format", default="markdown", choices=["markdown", "json"], help="Format for --export-brief")
     parser.add_argument("--auto-approve", action="store_true", help="Bypass interactive HITL approval prompt")
     parser.add_argument("--no-dpo", action="store_true", help="Disable DPO trajectory export")
 
     args = parser.parse_args()
-    run_triage(
-        case_id=None if args.live else args.case_id,
-        live=args.live,
-        target_service=args.target_service,
-        auto_approve=args.auto_approve,
-        export_dpo=not args.no_dpo,
-    )
+    if args.live and args.case_id is not None:
+        parser.error("Cannot combine --live with --case-id; specify either live probing or a replay fixture.")
+
+    resolved_case_id = None if args.live else (args.case_id or "case_01")
+    try:
+        final_state = run_triage(
+            case_id=resolved_case_id,
+            live=args.live,
+            target_service=args.target_service,
+            trace_id=args.trace_id,
+            use_llm=args.use_llm,
+            export_brief=args.export_brief,
+            brief_format=args.brief_format,
+            auto_approve=args.auto_approve,
+            export_dpo=not args.no_dpo,
+        )
+    except BrokenPipeError:
+        return 0
+
+    status = final_state.get("terminal_status", "OPERATIONAL_FAILURE")
+    if status == "SUPPORTED_DIAGNOSIS":
+        return 0
+    if status == "INSUFFICIENT_EVIDENCE":
+        return 2
+    return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

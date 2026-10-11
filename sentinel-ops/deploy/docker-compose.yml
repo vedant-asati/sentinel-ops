@@ -8,6 +8,15 @@ services:
     environment:
       - SERVICE_NAME=checkout-service
       - PORT=8001
+      - CART_URL=http://cart-service:8002
+      - PRICING_URL=http://pricing-service:8003
+      - PAYMENT_URL=http://payment-service:8004
+      - TEMPO_OTLP_URL=http://tempo:4318/v1/traces
+    depends_on:
+      - cart-service
+      - pricing-service
+      - payment-service
+      - tempo
     ports:
       - "8001:8001"
 
@@ -20,6 +29,9 @@ services:
     environment:
       - SERVICE_NAME=cart-service
       - PORT=8002
+      - TEMPO_OTLP_URL=http://tempo:4318/v1/traces
+    depends_on:
+      - tempo
     ports:
       - "8002:8002"
 
@@ -32,6 +44,9 @@ services:
     environment:
       - SERVICE_NAME=pricing-service
       - PORT=8003
+      - TEMPO_OTLP_URL=http://tempo:4318/v1/traces
+    depends_on:
+      - tempo
     ports:
       - "8003:8003"
 
@@ -44,6 +59,9 @@ services:
     environment:
       - SERVICE_NAME=payment-service
       - PORT=8004
+      - TEMPO_OTLP_URL=http://tempo:4318/v1/traces
+    depends_on:
+      - tempo
     ports:
       - "8004:8004"
 
@@ -61,3 +79,4 @@ services:
       - ./tempo/tempo.yml:/etc/tempo.yml
     ports:
       - "53201:53201"
+      - "4318:4318"
