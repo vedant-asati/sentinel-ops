@@ -207,8 +207,7 @@ class TempoAdapter:
                         status_obj = s.get("status") or {}
                         err_msg = status_obj.get("message") or None
                         if not err_msg and status_obj.get("code") in (2, "STATUS_CODE_ERROR"):
-                            s_name = s.get("name", "")
-                            err_msg = "TimeoutError" if "acquire" in s_name or "connect" in s_name else "Error"
+                            err_msg = "Error"
                         span_rec = {
                             "span_id": s.get("spanId", ""),
                             "parent_span_id": s.get("parentSpanId", ""),

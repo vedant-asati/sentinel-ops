@@ -51,6 +51,13 @@ mock_telemetry:
           - '2.0'
         - - 1795530735
           - '2.0'
+      db_pool_acquire_timeouts_total:
+        status: SUCCESS
+        values:
+        - - 1795530720
+          - '2'
+        - - 1795530735
+          - '11'
     pricing-service:
       latency_p95:
         status: SUCCESS

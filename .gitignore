@@ -44,7 +44,7 @@ htmlcov/
 
 # Runtime data & logs
 .cache/
-data/dpo/
+**/data/dpo/
 *.log
 
 tmp/**

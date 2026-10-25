@@ -123,3 +123,53 @@ async def test_supervisor_uses_llm_planner_when_enabled():
     assert "LLM Hypothesis: payment DB wait saturation" in out["hypotheses"]
     assert len(out["llm_planned_probes"]) == 1
     assert out["llm_planned_probes"][0]["metric_type"] == "db_pool_acquire_timeouts_total"
+
+
+def test_validate_brief_narrative_blocks_unreviewed_ids_and_mechanisms():
+    """Contract (P1.4): Brief validation strips narratives citing absent IDs or unverified root-cause mechanisms."""
+    from sentinel_ops.agents.synthesizer import validate_brief_narrative
+
+    ev = EvidenceItem(
+        id="EV-prom-real",
+        backend_source="prometheus",
+        query_string="payment_db_pool_active",
+        query_params={},
+        observation_window=("2026-11-24T14:30:00Z", "2026-11-24T14:35:00Z"),
+        sample_or_span_ref="db_pool_active",
+        finding="saturated",
+        raw_payload="2.0",
+        status="SUCCESS",
+    )
+    claim = AtomicClaim(
+        claim_id="CL-001",
+        statement="db_pool_exhaustion in payment-service",
+        claim_type="root_cause",
+        cited_evidence_ids=["EV-prom-real"],
+    )
+    assert validate_brief_narrative("Confirmed db_pool_exhaustion in payment-service [EV-prom-real].", [claim], [ev]) is not None
+    # Unreviewed / fabricated evidence ID must be rejected
+    assert validate_brief_narrative("Storage device failure [EV-absent].", [claim], [ev]) is None
+    # Contradictory mechanism citing a real ID must also be rejected
+    assert validate_brief_narrative("Root cause is DNS outage and BGP leak [EV-prom-real].", [claim], [ev]) is None
+
+
+def test_supervisor_surgical_query_budget_and_crag_escalation():
+    """Contract (Phase B): Round 0 with use_llm=True dispatches only trace + planned probes; CRAG retry escalates."""
+    from sentinel_ops.agents.supervisor import route_supervisor_to_specialists
+
+    planned = [{"service": "pricing-service", "metric_type": "cpu_saturation", "rationale": "CPU check"}]
+    round0_state = InvestigationState(
+        incident_id="inc_budget",
+        alert_text="Latency spike",
+        incident_timestamp="2026-11-24T15:10:00Z",
+        target_service="checkout-service",
+        use_llm=True,
+        crag_iterations=0,
+        llm_planned_probes=planned,
+    )
+    round0_sends = route_supervisor_to_specialists(round0_state)
+    assert len(round0_sends) == 2  # trace_specialist + 1 LLM probe
+
+    retry_state = round0_state.model_copy(update={"crag_iterations": 1})
+    retry_sends = route_supervisor_to_specialists(retry_state)
+    assert len(retry_sends) > len(round0_sends)  # Escalated to full dependency matrix

@@ -1,10 +1,61 @@
 import json
 import logging
-from typing import Any, Dict, List
+import re
+from typing import Any, Dict, List, Optional
 from sentinel_ops.agents.llm_planner import refine_brief_with_llm
-from sentinel_ops.agents.state import AtomicClaim, InvestigationState
+from sentinel_ops.agents.state import AtomicClaim, EvidenceItem, InvestigationState
 
 logger = logging.getLogger(__name__)
+
+
+def validate_brief_narrative(
+    narrative: Optional[str],
+    claims: List[Any],
+    evidence: List[Any],
+) -> Optional[str]:
+    """Ensures any free-text LLM narrative cites only verified [EV-xxx] IDs and avoids invented mechanisms."""
+    if not narrative or not isinstance(narrative, str) or not narrative.strip():
+        return None
+    if not claims:
+        return None
+
+    def _get(obj, attr, default=None):
+        return obj.get(attr, default) if isinstance(obj, dict) else getattr(obj, attr, default)
+
+    verified_ids = {
+        cid
+        for c in claims
+        for cid in (_get(c, "cited_evidence_ids", []) or [])
+    }
+    successful_ids = {
+        _get(e, "id") for e in evidence if _get(e, "status") == "SUCCESS"
+    }
+    allowed_ids = verified_ids & successful_ids
+    cited_in_text = re.findall(r"\[?(EV-[A-Za-z0-9_\-]+)\]?", narrative)
+    if any(eid not in allowed_ids for eid in cited_in_text):
+        return None
+
+    # Ensure narrative does not assert a contradictory root-cause service against claims
+    root_text = " ".join(
+        str(_get(c, "statement", "")).lower()
+        for c in claims
+        if _get(c, "claim_type") == "root_cause"
+    )
+    claim_all_text = " ".join(str(_get(c, "statement", "")).lower() for c in claims)
+    narr_lower = narrative.lower()
+    for svc in ("payment-service", "pricing-service", "cart-service", "checkout-service"):
+        if svc in narr_lower and svc not in claim_all_text:
+            return None
+
+    # Require root-cause service from CL-001 to appear cleanly and reject invented generic fault domains
+    forbidden_invented = ("storage device", "disk failure", "dns hijacking", "bgp route")
+    if any(term in narr_lower for term in forbidden_invented):
+        return None
+    if root_text:
+        for svc in ("payment-service", "pricing-service", "cart-service"):
+            if svc in root_text and svc not in narr_lower:
+                return None
+    return narrative.strip()
 
 
 def format_incident_brief(state: Dict[str, Any] | InvestigationState, fmt: str = "markdown") -> str:
@@ -15,7 +66,7 @@ def format_incident_brief(state: Dict[str, Any] | InvestigationState, fmt: str =
     status = data.get("terminal_status", "OPERATIONAL_FAILURE")
     reason = data.get("terminal_reason", "")
     summary = data.get("root_cause_summary") or "No causal mechanism substantiated."
-    brief_narrative = data.get("incident_brief_narrative")
+    raw_narrative = data.get("incident_brief_narrative")
     mechanism = data.get("mechanism") or "undetermined"
     claims = data.get("structured_claims") or []
     evidence = data.get("evidence") or []
@@ -32,16 +83,20 @@ def format_incident_brief(state: Dict[str, Any] | InvestigationState, fmt: str =
 
     ev_list = [_ev_dict(e) for e in evidence]
     cl_list = [_cl_dict(c) for c in claims]
+    brief_narrative = validate_brief_narrative(raw_narrative, cl_list, ev_list)
 
     if fmt == "json":
         return json.dumps(
             {
                 "incident_id": incident_id,
                 "target_service": target_service,
+                "incident_timestamp": data.get("incident_timestamp"),
+                "trace_id": data.get("trace_id"),
                 "terminal_status": status,
-                "root_cause_summary": summary,
+                "root_cause_summary": brief_narrative if (brief_narrative and status == "SUPPORTED_DIAGNOSIS") else summary,
                 "mechanism": mechanism,
                 "claims": cl_list,
+                "evidence": ev_list,
                 "evidence_count": len(ev_list),
                 "affected_callers": callers,
                 "blast_radius_score": blast_score,
@@ -111,9 +166,17 @@ async def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
         return e.query_params.get("service") == "pricing-service" or "pricing" in e.query_string or "pricing" in e.id or "pric" in e.id
 
     # Find identifying evidence
-    payment_evidence = next((e for e in successful_items.values() if is_payment(e) and "saturated" in e.finding), None)
-    pricing_metric_ev = next((e for e in successful_items.values() if is_pricing(e) and "spiked" in e.finding), None)
-    pricing_cpu_ev = next((e for e in successful_items.values() if is_pricing(e) and ("cpu" in e.query_string.lower() or "cpu" in e.sample_or_span_ref.lower())), None)
+    payment_evidence = next((e for e in successful_items.values() if is_payment(e) and "saturated" in e.finding and e.sample_or_span_ref == "db_pool_active"), None)
+    payment_wait_ev = next(
+        (
+            e for e in successful_items.values()
+            if (is_payment(e) and e.sample_or_span_ref == "db_pool_acquire_timeouts_total" and "spiked" in e.finding)
+            or (e.backend_source == "tempo" and "payment-service" in e.finding and "TimeoutError" in e.finding)
+        ),
+        None,
+    )
+    pricing_metric_ev = next((e for e in successful_items.values() if is_pricing(e) and "latency_p95 spiked" in e.finding), None)
+    pricing_cpu_ev = next((e for e in successful_items.values() if is_pricing(e) and e.sample_or_span_ref == "cpu_saturation" and "saturated" in e.finding), None)
     pricing_trace_ev = next((e for e in successful_items.values() if e.backend_source == "tempo" and "pricing-service" in e.finding and "bottleneck" in e.finding), None)
     pricing_normal_ev = next((e for e in successful_items.values() if is_pricing(e) and ("normal" in e.finding or "healthy" in e.finding) and "nan" not in e.finding.lower()), None)
     
@@ -206,9 +269,9 @@ async def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
                     "recommended_runbook_action": f"kubectl rollout restart deployment/{svc}",
                 }
 
-    if payment_evidence:
-        cited_ids = [payment_evidence.id]
-        if payment_trace_ev:
+    if payment_evidence and payment_wait_ev:
+        cited_ids = [payment_evidence.id, payment_wait_ev.id]
+        if payment_trace_ev and payment_trace_ev.id not in cited_ids:
             cited_ids.append(payment_trace_ev.id)
         claims.append(
             AtomicClaim(
@@ -221,7 +284,7 @@ async def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
         claims.append(
             AtomicClaim(
                 claim_id="CL-002",
-                statement=payment_evidence.finding,
+                statement=f"{payment_evidence.finding}; {payment_wait_ev.finding}",
                 claim_type="mechanism",
                 cited_evidence_ids=cited_ids,
             )
@@ -302,16 +365,14 @@ async def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
         ]
         runbook_action = "kubectl rollout undo deployment/payment-service"
 
-    elif pricing_trace_ev or (pricing_metric_ev and pricing_cpu_ev):
+    elif pricing_cpu_ev and (pricing_trace_ev or pricing_metric_ev):
         primary_ev = pricing_trace_ev or pricing_metric_ev
         assert primary_ev is not None
-        cited_pricing = [primary_ev.id]
+        cited_pricing = [primary_ev.id, pricing_cpu_ev.id]
         if pricing_trace_ev and pricing_trace_ev.id not in cited_pricing:
             cited_pricing.append(pricing_trace_ev.id)
         if pricing_metric_ev and pricing_metric_ev.id not in cited_pricing:
             cited_pricing.append(pricing_metric_ev.id)
-        if pricing_cpu_ev and pricing_cpu_ev.id not in cited_pricing:
-            cited_pricing.append(pricing_cpu_ev.id)
 
         claims.append(
             AtomicClaim(
@@ -324,7 +385,7 @@ async def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
         claims.append(
             AtomicClaim(
                 claim_id="CL-002",
-                statement=primary_ev.finding,
+                statement=f"{primary_ev.finding}; {pricing_cpu_ev.finding}",
                 claim_type="mechanism",
                 cited_evidence_ids=cited_pricing,
             )
@@ -366,7 +427,11 @@ async def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
             deadline_timestamp=state.deadline_timestamp,
         )
         if refined:
-            brief_narrative = refined.executive_summary
+            brief_narrative = validate_brief_narrative(
+                refined.executive_summary,
+                [c.model_dump() for c in claims],
+                [e.model_dump() for e in evidence_list],
+            )
             if refined.prioritized_next_check and refined.prioritized_next_check not in next_checks:
                 next_checks = [refined.prioritized_next_check] + next_checks
 

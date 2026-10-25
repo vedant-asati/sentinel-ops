@@ -15,13 +15,13 @@ def reference(incident):
     """Positive control derived only from observable inputs, independent of case labels."""
     snapshot = incident["mock_telemetry"]
     trace_id = incident["trace_id"]
-    trace = snapshot["tempo"][trace_id]
+    trace = snapshot["tempo"].get(trace_id)
     result = {"status": INSUFFICIENT, "service": None, "mechanism": None, "citations": []}
     records = [r for svc in snapshot["prometheus"].values() for r in svc.values()]
     if all(r["status"] == "TOOL_FAILURE" for r in [*records, *snapshot["tempo"].values()]):
         return dict(result, status=FAILURE)
     end = datetime.fromisoformat(incident["incident_timestamp"]).timestamp()
-    if trace["status"] != "SUCCESS" or not end - 60 <= trace["timestamp"] <= end:
+    if not trace or trace["status"] != "SUCCESS" or not end - 60 <= trace["timestamp"] <= end:
         return result
     operations = {
         "db.connection.acquire": ("pool_acquisition_timeout", "db_pool_acquire_timeouts_total"),
@@ -48,7 +48,7 @@ def test_generated_protocol_is_solvable_without_labels(seed):
     assert generate(seed) == cases
     assert generate(seed + 1) != cases
     assert len({case.incident["id"] for case in cases}) == len(cases)
-    assert Counter(case.status for case in cases) == {SUPPORTED: 8, INSUFFICIENT: 28, FAILURE: 4}
+    assert Counter(case.status for case in cases) == {SUPPORTED: 8, INSUFFICIENT: 36, FAILURE: 4}
     for case in cases:
         assert set(case.incident) == {"id", "target_service", "alert_text", "incident_timestamp",
                                       "trace_id", "mock_telemetry"}
@@ -125,7 +125,7 @@ def test_cli_reports_and_fails_on_bad_candidate(tmp_path):
     assert main(["--seed", "7", "--report", str(path), "--", sys.executable, "-c", "print('{}')"]) == 1
     report = json.loads(path.read_text())
     assert report["seed"] == 7
-    assert report["summary"]["total"] == len(report["cases"]) == 40
+    assert report["summary"]["total"] == len(report["cases"]) == 48
     assert all(row["incident"]["id"] == row["id"] for row in report["cases"])
 
 

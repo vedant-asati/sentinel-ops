@@ -22,6 +22,13 @@ else
     SENTINEL_DIR="$SCRIPT_DIR"
 fi
 
+# Ensure sandbox ALWAYS recovers even if CLI exits non-zero (abstention / operational failure)
+cleanup() {
+    echo -e "\n${YELLOW}[Cleanup] Recovering Telemetry Sandbox to Healthy Baseline...${NC}"
+    (cd "$SENTINEL_DIR" && uv run python -m sentinel_ops.chaos recover >/dev/null 2>&1) || true
+}
+trap cleanup EXIT
+
 cd "$SENTINEL_DIR"
 
 echo -e "${CYAN}${BOLD}════════════════════════════════════════════════════════════════════════════${NC}"

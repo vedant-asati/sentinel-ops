@@ -1,11 +1,12 @@
 import asyncio
 import json
 import logging
+import sys
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from sentinel_ops.agents.blast_radius import calculate_reverse_blast_radius
-from sentinel_ops.mcp.prometheus_adapter import PrometheusAdapter
+from sentinel_ops.mcp.prometheus_adapter import ALLOWED_SERVICES, PrometheusAdapter
 from sentinel_ops.mcp.tempo_adapter import TempoAdapter
 from sentinel_ops.memory.graph_rag import TopologyGraphRAG
 
@@ -50,6 +51,31 @@ class MCPToolRegistry:
     async def tempo_get_trace(self, trace_id: str) -> Dict[str, Any]:
         """Retrieves and analyzes a distributed trace waterfall from Tempo."""
         return await self.tempo_adapter.get_trace_waterfall(trace_id=trace_id)
+
+    async def tempo_search_traces(
+        self,
+        service: str,
+        start_iso: str,
+        end_iso: str,
+        limit: int = 5,
+    ) -> Dict[str, Any]:
+        """Discovers the most recent trace ID in Tempo matching service & incident time window."""
+        if service not in ALLOWED_SERVICES:
+            raise ValueError(f"Service '{service}' is not in allowed services list.")
+        bounded_limit = max(1, min(20, int(limit)))
+        trace_id = await self.tempo_adapter.search_traces(
+            service=service,
+            start_iso=start_iso,
+            end_iso=end_iso,
+            limit=bounded_limit,
+        )
+        return {
+            "status": "SUCCESS" if trace_id else "EMPTY",
+            "service": service,
+            "start_iso": start_iso,
+            "end_iso": end_iso,
+            "trace_id": trace_id,
+        }
 
     def calculate_blast_radius(self, target_service: str, action: str = "restart") -> Dict[str, Any]:
         """Computes upstream caller transitive blast radius and risk score with strict parameter validation."""
@@ -144,6 +170,20 @@ def list_tools() -> List[Dict[str, Any]]:
             },
         },
         {
+            "name": "tempo_search_traces",
+            "description": "Searches Tempo for the latest trace_id matching service and [start_iso, end_iso].",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service": {"type": "string", "enum": list(ALLOWED_SERVICES)},
+                    "start_iso": {"type": "string"},
+                    "end_iso": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                },
+                "required": ["service", "start_iso", "end_iso"],
+            },
+        },
+        {
             "name": "calculate_blast_radius",
             "description": "Calculates upstream dependency blast radius for a service.",
             "parameters": {
@@ -207,6 +247,9 @@ async def handle_jsonrpc_request(request: Dict[str, Any]) -> Dict[str, Any]:
         elif name == "tempo_get_trace":
             res = await mcp_registry.tempo_get_trace(**arguments)
             return {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": json.dumps(res)}]}}
+        elif name == "tempo_search_traces":
+            res = await mcp_registry.tempo_search_traces(**arguments)
+            return {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": json.dumps(res)}]}}
         elif name == "promql_range_query":
             res = await mcp_registry.promql_range_query(**arguments)
             return {"jsonrpc": "2.0", "id": req_id, "result": {"content": [{"type": "text", "text": json.dumps(res)}]}}
@@ -227,8 +270,34 @@ async def handle_jsonrpc_request(request: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
+async def serve_stdio(stdin_stream=None, stdout_stream=None) -> None:
+    """Runs newline-delimited JSON-RPC 2.0 MCP transport over stdio."""
+    in_stream = stdin_stream or sys.stdin
+    out_stream = stdout_stream or sys.stdout
+    for raw_line in in_stream:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError as exc:
+            resp = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"Parse error: {exc}"}}
+        else:
+            resp = await handle_jsonrpc_request(req)
+        out_stream.write(json.dumps(resp) + "\n")
+        out_stream.flush()
+
+
+def main() -> None:
+    """CLI entrypoint (`sentinel-ops-mcp`) starting the MCP stdio server."""
+    asyncio.run(serve_stdio())
+
+
 if __name__ == "__main__":
-    tools = list_tools()
-    print(f"Sentinel-Ops MCP Registry initialized with {len(tools)} tools:")
-    for t in tools:
-        print(f"  - {t['name']}: {t['description']}")
+    if "--info" in sys.argv:
+        tools = list_tools()
+        print(f"Sentinel-Ops MCP Registry initialized with {len(tools)} tools:")
+        for t in tools:
+            print(f"  - {t['name']}: {t['description']}")
+    else:
+        main()

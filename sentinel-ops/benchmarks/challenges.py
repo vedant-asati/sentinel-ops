@@ -98,8 +98,9 @@ def generate(seed: int) -> list[Case]:
             reordered["alert_text"] = f"Repeated 504s on checkout. Investigate request {trace_id}."
             add("renamed-reordered", reordered, SUPPORTED)
 
-            for family in ("flat-counter", "counter-reset", "stale-counter", "wrong-service",
-                           "nonfinite", "stale-trace", "unrelated-trace", "collector-outage"):
+            for family in ("flat-counter", "counter-reset", "stale-counter", "future-counter",
+                           "wrong-service", "nonfinite", "stale-trace", "unrelated-trace",
+                           "missing-requested-trace", "collector-outage"):
                 incident = deepcopy(base)
                 snapshot = incident["mock_telemetry"]
                 metrics = snapshot["prometheus"]
@@ -111,6 +112,9 @@ def generate(seed: int) -> list[Case]:
                 elif family == "stale-counter":
                     for sample in values:
                         sample[0] -= 86400
+                elif family == "future-counter":
+                    for sample in values:
+                        sample[0] += 3600
                 elif family == "wrong-service":
                     metrics[other][counter], metrics[service][counter] = (
                         metrics[service][counter], metrics[other][counter])
@@ -120,6 +124,10 @@ def generate(seed: int) -> list[Case]:
                     snapshot["tempo"][trace_id]["timestamp"] -= 86400
                 elif family == "unrelated-trace":
                     snapshot["tempo"][trace_id] = {"status": "EMPTY"}
+                elif family == "missing-requested-trace":
+                    missing_id = trace_id
+                    extra_id = f"{rng.getrandbits(128):032x}"
+                    snapshot["tempo"][extra_id] = deepcopy(snapshot["tempo"].pop(missing_id))
                 else:
                     for signals in metrics.values():
                         for key in signals:

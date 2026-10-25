@@ -216,13 +216,24 @@ def test_evidence_id_collision_silently_drops_critical_metric():
     assert merged[0].sample_or_span_ref == "db_pool_active"
     assert "saturated" in merged[0].finding
 
-    # Consequences on Sufficiency:
+    # Consequences on Sufficiency: requires both saturated pool AND wait contention (P1.3)
+    wait_item = EvidenceItem(
+        id="EV-prom-paym-wait",
+        backend_source="prometheus",
+        query_string="payment-service_db_pool_acquire_timeouts_total",
+        query_params={"service": "payment-service", "metric_type": "db_pool_acquire_timeouts_total"},
+        observation_window=("2026-11-24T14:30:00Z", "2026-11-24T14:35:00Z"),
+        sample_or_span_ref="db_pool_acquire_timeouts_total",
+        finding="payment-service db_pool_acquire_timeouts_total spiked with delta +12 timeouts",
+        raw_payload="",
+        status="SUCCESS",
+    )
     state = InvestigationState(
         incident_id="INC-COLLISION",
         alert_text="Alert",
         incident_timestamp="2026-11-24T14:30:00Z",
         target_service="checkout-service",
-        evidence=merged,
+        evidence=merged + [wait_item],
     )
     suff = crag_sufficiency_node(state)
     assert suff["crag_sufficient"] is True

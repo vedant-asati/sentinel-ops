@@ -72,6 +72,11 @@ def interpret_metric(
             finding = f"{service} latency_p95 spiked critically at {val:.3f}s (anomaly detected)"
         else:
             finding = f"{service} latency_p95 normal at {val:.3f}s (healthy)"
+    elif metric_type == "cpu_saturation":
+        if val >= 0.85:
+            finding = f"{service} cpu_saturation critically saturated at {val*100:.0f}%"
+        else:
+            finding = f"{service} cpu_saturation normal at {val*100:.0f}%"
     elif metric_type == "memory_usage":
         if val >= 0.90:
             finding = f"{service} memory_usage critically exhausted at {val*100:.0f}% limit"
@@ -135,6 +140,11 @@ async def metrics_specialist_node(payload: Dict[str, Any]) -> Dict[str, List[Evi
         m_tag = "erro"
     elif metric_type == "cpu_saturation":
         m_tag = "cpu_"
+    elif metric_type == "cpu_saturation":
+        if val >= 0.85:
+            finding = f"{service} cpu_saturation critically saturated at {val*100:.0f}%"
+        else:
+            finding = f"{service} cpu_saturation normal at {val*100:.0f}%"
     elif metric_type == "memory_usage":
         m_tag = "memo"
     elif metric_type == "container_restarts":
@@ -159,12 +169,27 @@ async def metrics_specialist_node(payload: Dict[str, Any]) -> Dict[str, List[Evi
         return {"evidence": [item]}
 
     incident_ts_str = payload.get("incident_timestamp")
-    end_ts = None
-    if incident_ts_str:
+    start_ts: Optional[float] = None
+    end_ts: Optional[float] = None
+    if window and len(window) == 2 and payload.get("observation_window") is not None:
         try:
-            end_ts = datetime.fromisoformat(incident_ts_str.replace("Z", "+00:00")).timestamp()
+            start_ts = datetime.fromisoformat(window[0].replace("Z", "+00:00")).timestamp()
+            end_ts = datetime.fromisoformat(window[1].replace("Z", "+00:00")).timestamp()
         except Exception:
-            end_ts = None
+            start_ts, end_ts = None, None
+    elif incident_ts_str:
+        try:
+            t_inc = datetime.fromisoformat(incident_ts_str.replace("Z", "+00:00")).timestamp()
+            start_ts = t_inc - 120.0
+            end_ts = t_inc + 180.0
+        except Exception:
+            start_ts, end_ts = None, None
+
+    def _filter_to_window(raw_samples: List[Any]) -> Optional[List[Any]]:
+        if not raw_samples or start_ts is None or end_ts is None:
+            return raw_samples
+        matched = [s for s in raw_samples if start_ts <= float(s[0]) <= end_ts]
+        return matched if matched else None
 
     if is_replay:
         simulated_data = sim_telem.get("prometheus", {}).get(service, {}).get(metric_type)
@@ -186,9 +211,9 @@ async def metrics_specialist_node(payload: Dict[str, Any]) -> Dict[str, List[Evi
         status = simulated_data.get("status", "SUCCESS")
         raw_values = simulated_data.get("values", [])
         if status == "SUCCESS":
-            # Check for stale samples if end_ts is available (> 2 hours away)
-            if end_ts and raw_values:
-                window_samples = [s for s in raw_values if abs(s[0] - end_ts) <= 7200]
+            # Strictly anchor metric samples inside the declared incident observation window
+            if start_ts is not None and end_ts is not None and raw_values:
+                window_samples = _filter_to_window(raw_values)
                 if not window_samples:
                     item = EvidenceItem(
                         id=evidence_id,
@@ -197,7 +222,7 @@ async def metrics_specialist_node(payload: Dict[str, Any]) -> Dict[str, List[Evi
                         query_params={"service": service, "metric_type": metric_type},
                         observation_window=window,
                         sample_or_span_ref=metric_type,
-                        finding=f"Metric '{metric_type}' for service '{service}' contains only stale samples outside incident window (STALE_TELEMETRY)",
+                        finding=f"Metric '{metric_type}' for service '{service}' contains only stale/out-of-window samples (STALE_TELEMETRY)",
                         raw_payload="",
                         status="EMPTY",
                     )
@@ -267,6 +292,22 @@ async def metrics_specialist_node(payload: Dict[str, Any]) -> Dict[str, List[Evi
         if not values and series and "value" in series[0]:
             values = [series[0]["value"]]
 
+        if start_ts is not None and end_ts is not None and values:
+            windowed_live = _filter_to_window(values)
+            if not windowed_live:
+                return {"evidence": [EvidenceItem(
+                    id=evidence_id,
+                    backend_source="prometheus",
+                    query_string=promql,
+                    query_params={"service": service, "metric_type": metric_type},
+                    observation_window=window,
+                    sample_or_span_ref=metric_type,
+                    finding=f"Live metric '{metric_type}' for '{service}' contains only samples outside incident window (STALE_TELEMETRY)",
+                    raw_payload="",
+                    status="EMPTY",
+                )]}
+            values = windowed_live
+
         cap = None
         if metric_type == "db_pool_active":
             cap_timeout = _compute_remaining_timeout(deadline_ts)
@@ -314,12 +355,27 @@ async def trace_specialist_node(payload: Dict[str, Any]) -> Dict[str, List[Evide
     evidence_id = f"EV-tempo-{target_service[:4]}"
 
     incident_ts_str = payload.get("incident_timestamp")
-    end_ts = None
-    if incident_ts_str:
+    start_ts: Optional[float] = None
+    end_ts: Optional[float] = None
+    if window and len(window) == 2 and payload.get("observation_window") is not None:
         try:
-            end_ts = datetime.fromisoformat(incident_ts_str.replace("Z", "+00:00")).timestamp()
+            start_ts = datetime.fromisoformat(window[0].replace("Z", "+00:00")).timestamp()
+            end_ts = datetime.fromisoformat(window[1].replace("Z", "+00:00")).timestamp()
         except Exception:
-            end_ts = None
+            start_ts, end_ts = None, None
+    elif incident_ts_str:
+        try:
+            t_inc = datetime.fromisoformat(incident_ts_str.replace("Z", "+00:00")).timestamp()
+            start_ts = t_inc - 120.0
+            end_ts = t_inc + 180.0
+        except Exception:
+            start_ts, end_ts = None, None
+
+    def _filter_to_window(raw_samples: List[Any]) -> Optional[List[Any]]:
+        if not raw_samples or start_ts is None or end_ts is None:
+            return raw_samples
+        matched = [s for s in raw_samples if start_ts <= float(s[0]) <= end_ts]
+        return matched if matched else None
 
     deadline_ts = payload.get("deadline_timestamp")
     if deadline_ts and time.monotonic() > deadline_ts:
@@ -352,15 +408,27 @@ async def trace_specialist_node(payload: Dict[str, Any]) -> Dict[str, List[Evide
             )
             return {"evidence": [item]}
 
-        # Prioritize target_trace_id if explicitly requested
+        # Never substitute another trace when a specific target_trace_id was explicitly requested
         target_trace_id = payload.get("trace_id")
         selected_trace_id = None
         selected_trace_data = None
-        if target_trace_id and target_trace_id in simulated_tempo:
+        if target_trace_id:
+            if target_trace_id not in simulated_tempo:
+                return {"evidence": [EvidenceItem(
+                    id=evidence_id,
+                    backend_source="tempo",
+                    query_string=str(target_trace_id),
+                    query_params={"target_service": target_service, "trace_id": target_trace_id},
+                    observation_window=window,
+                    sample_or_span_ref="span_waterfall",
+                    finding=f"Requested trace '{target_trace_id}' not found in replay snapshot (EMPTY)",
+                    raw_payload="",
+                    status="EMPTY",
+                )]}
             selected_trace_id = target_trace_id
             selected_trace_data = simulated_tempo[target_trace_id]
         else:
-            # Deterministic trace selection: prioritize valid SUCCESS traces
+            # Deterministic trace selection when alert has no explicit trace_id
             for tid in sorted(simulated_tempo.keys()):
                 tdata = simulated_tempo[tid]
                 if tdata.get("status") == "SUCCESS":
@@ -385,10 +453,10 @@ async def trace_specialist_node(payload: Dict[str, Any]) -> Dict[str, List[Evide
                 status=status,
             )]}
 
-        # Check trace timestamp against incident observation window
+        # Strict incident observation window check on trace timestamp
         trace_ts = selected_trace_data.get("timestamp")
-        if end_ts and trace_ts is not None:
-            if not (end_ts - 60 <= trace_ts <= end_ts):
+        if start_ts is not None and end_ts is not None and trace_ts is not None:
+            if not (start_ts <= float(trace_ts) <= end_ts):
                 return {"evidence": [EvidenceItem(
                     id=evidence_id,
                     backend_source="tempo",

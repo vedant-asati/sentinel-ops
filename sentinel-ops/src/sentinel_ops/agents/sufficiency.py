@@ -1,10 +1,24 @@
+from datetime import datetime
 import logging
 import time
 from typing import Any, Dict
-from sentinel_ops.agents.state import InvestigationState
+from sentinel_ops.agents.state import EvidenceItem, InvestigationState
 from sentinel_ops.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _evidence_in_incident_window(ev: EvidenceItem, incident_timestamp: str) -> bool:
+    """Validates that an evidence observation window actually brackets T_incident within bounded range."""
+    if not incident_timestamp or not ev.observation_window or len(ev.observation_window) != 2:
+        return True
+    try:
+        t_inc = datetime.fromisoformat(incident_timestamp.replace("Z", "+00:00")).timestamp()
+        w_start = datetime.fromisoformat(ev.observation_window[0].replace("Z", "+00:00")).timestamp()
+        w_end = datetime.fromisoformat(ev.observation_window[1].replace("Z", "+00:00")).timestamp()
+        return (w_start - 180.0 <= t_inc <= w_end + 180.0) and (w_end - w_start <= 600.0)
+    except Exception:
+        return True
 
 
 def crag_sufficiency_node(state: InvestigationState) -> Dict[str, Any]:
@@ -15,10 +29,27 @@ def crag_sufficiency_node(state: InvestigationState) -> Dict[str, Any]:
     logger.info("Evaluating CRAG sufficiency (iteration %d)...", state.crag_iterations)
 
     evidence_list = state.evidence
-    successful_items = [e for e in evidence_list if e.status == "SUCCESS"]
+    successful_items = [
+        e for e in evidence_list
+        if e.status == "SUCCESS" and _evidence_in_incident_window(e, state.incident_timestamp)
+    ]
 
-    # 1. Check if trace contains TimeoutError (targeted timeout investigation)
-    timeout_trace = next((e for e in successful_items if e.backend_source == "tempo" and "TimeoutError" in e.finding), None)
+    # 1. Check if trace matches explicit state.trace_id (if set) and contains TimeoutError
+    timeout_trace = next(
+        (
+            e for e in successful_items
+            if e.backend_source == "tempo"
+            and "TimeoutError" in e.finding
+            and (not state.trace_id or e.query_string == state.trace_id or e.query_params.get("trace_id") == state.trace_id)
+        ),
+        None,
+    )
+
+    has_requested_trace = bool(state.trace_id) and any(
+        e.backend_source == "tempo"
+        and (e.query_string == state.trace_id or e.query_params.get("trace_id") == state.trace_id)
+        for e in successful_items
+    )
 
     if timeout_trace:
         op = timeout_trace.query_params.get("operation", "")
@@ -45,19 +76,41 @@ def crag_sufficiency_node(state: InvestigationState) -> Dict[str, Any]:
                 has_timeout_corroboration = True
 
         is_sufficient = has_timeout_corroboration
-    elif state.trace_id:
-        # Alert targeted a specific request trace, but no corroborated timeout trace was observed
+    elif state.trace_id and not has_requested_trace:
+        # Alert targeted a specific request trace, but requested trace_id was missing/failed/stale
         is_sufficient = False
     else:
-        # Standard incident patterns (no specific request trace targeted)
+        # Untargeted incident OR targeted non-timeout trace present with matching service saturation/error metrics
         has_payment_saturation = any(
             "saturated" in e.finding for e in successful_items if e.sample_or_span_ref == "db_pool_active"
         )
-        has_pricing_bottleneck = any(
-            ("pricing-service" in e.finding and "bottleneck" in e.finding)
-            or ("pricing" in e.finding and "spiked" in e.finding)
+        has_payment_wait_contention = any(
+            (e.query_params.get("service") == "payment-service" or "paym" in e.id)
+            and e.sample_or_span_ref == "db_pool_acquire_timeouts_total"
+            and "spiked" in e.finding
+            for e in successful_items
+        ) or any(
+            e.backend_source == "tempo"
+            and "payment-service" in e.finding
+            and "TimeoutError" in e.finding
+            and "db.connection.acquire" in e.finding
             for e in successful_items
         )
+        has_payment_exhaustion = has_payment_saturation and has_payment_wait_contention
+
+        has_pricing_delay = any(
+            ("pricing-service" in e.finding and "bottleneck" in e.finding)
+            or ("pricing" in e.finding and "latency_p95 spiked" in e.finding)
+            for e in successful_items
+        )
+        has_pricing_cpu_saturated = any(
+            (e.query_params.get("service") == "pricing-service" or "pric" in e.id)
+            and e.sample_or_span_ref == "cpu_saturation"
+            and "saturated" in e.finding
+            for e in successful_items
+        )
+        has_pricing_cpu_bottleneck = has_pricing_delay and has_pricing_cpu_saturated
+
         has_cart_mem = any("cart" in e.finding and "exhausted" in e.finding for e in successful_items)
         has_cart_restart = any("cart" in e.finding and ("restarts elevated" in e.finding or "crash" in e.finding) for e in successful_items)
         has_cart_memory_exhaustion = has_cart_mem and has_cart_restart
@@ -67,8 +120,8 @@ def crag_sufficiency_node(state: InvestigationState) -> Dict[str, Any]:
         has_payment_error_spike = has_payment_err and (has_payment_trace or any("payment" in e.finding.lower() and "refused" in e.finding.lower() for e in successful_items))
 
         is_sufficient = (
-            has_payment_saturation
-            or has_pricing_bottleneck
+            has_payment_exhaustion
+            or has_pricing_cpu_bottleneck
             or has_cart_memory_exhaustion
             or has_payment_error_spike
         )

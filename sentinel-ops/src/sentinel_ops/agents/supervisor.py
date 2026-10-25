@@ -133,7 +133,8 @@ def route_supervisor_to_specialists(state: InvestigationState) -> List[Send]:
         "cart-service": ["memory_usage", "container_restarts", "error_rate"],
     }
 
-    # Dispatch LLM-planned probes first when enabled, then systemic topology dependencies without fixture peeking
+    # Dispatch surgical LLM-planned probes alone on first pass (use_llm=True, crag_iterations == 0),
+    # escalating to the full topology metric matrix on CRAG retry (crag_iterations > 0) or symbolic mode.
     dispatched: set[tuple[str, str]] = set()
     for probe in state.llm_planned_probes:
         svc = probe.get("service", "")
@@ -155,25 +156,27 @@ def route_supervisor_to_specialists(state: InvestigationState) -> List[Send]:
                 )
             )
 
-    for dep in dependencies:
-        m_types = SERVICE_METRICS.get(dep, ["error_rate", "latency_p95"])
-        for m_type in m_types:
-            if (dep, m_type) in dispatched:
-                continue
-            dispatched.add((dep, m_type))
-            tasks.append(
-                Send(
-                    "metrics_specialist",
-                    {
-                        "incident_id": state.incident_id,
-                        "service": dep,
-                        "metric_type": m_type,
-                        "observation_window": window,
-                        "incident_timestamp": state.incident_timestamp,
-                        "simulated_telemetry": sim_telem,
-                        "deadline_timestamp": state.deadline_timestamp,
-                    },
+    surgical_budget_active = bool(state.use_llm and state.crag_iterations == 0 and state.llm_planned_probes)
+    if not surgical_budget_active:
+        for dep in dependencies:
+            m_types = SERVICE_METRICS.get(dep, ["error_rate", "latency_p95"])
+            for m_type in m_types:
+                if (dep, m_type) in dispatched:
+                    continue
+                dispatched.add((dep, m_type))
+                tasks.append(
+                    Send(
+                        "metrics_specialist",
+                        {
+                            "incident_id": state.incident_id,
+                            "service": dep,
+                            "metric_type": m_type,
+                            "observation_window": window,
+                            "incident_timestamp": state.incident_timestamp,
+                            "simulated_telemetry": sim_telem,
+                            "deadline_timestamp": state.deadline_timestamp,
+                        },
+                    )
                 )
-            )
 
     return tasks

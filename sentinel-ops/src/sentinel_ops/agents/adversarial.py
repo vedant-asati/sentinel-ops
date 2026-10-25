@@ -2,6 +2,7 @@ import logging
 import time
 from typing import Any, Dict, List, Tuple
 from sentinel_ops.agents.state import AdversarialVerdict, AtomicClaim, EvidenceItem, InvestigationState
+from sentinel_ops.agents.sufficiency import _evidence_in_incident_window
 from sentinel_ops.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,17 @@ def adversarial_reviewer_node(state: InvestigationState) -> Dict[str, Any]:
                     invalid_citations.append(f"{eid} has non-SUCCESS status '{ev_item.status}'")
                 elif "nan" in ev_item.finding.lower():
                     invalid_citations.append(f"{eid} contains non-finite/NaN measurement ('{ev_item.finding}')")
+                elif not _evidence_in_incident_window(ev_item, state.incident_timestamp):
+                    invalid_citations.append(f"{eid} observation_window falls outside declared incident window")
+                elif (
+                    state.trace_id
+                    and ev_item.backend_source == "tempo"
+                    and ev_item.query_string != state.trace_id
+                    and ev_item.query_params.get("trace_id") != state.trace_id
+                ):
+                    invalid_citations.append(
+                        f"{eid} trace '{ev_item.query_string}' does not match requested trace_id '{state.trace_id}'"
+                    )
 
                 # Semantic service alignment check
                 stmt_lower = c.statement.lower()

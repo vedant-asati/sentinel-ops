@@ -1,3 +1,4 @@
+from datetime import datetime
 import json
 import math
 import re
@@ -13,8 +14,8 @@ METRIC_QUERY_TEMPLATES = {
     "latency_p95": 'histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{{service="{service}"}}[1m])))',
     "db_pool_active": 'payment_db_pool_active{{service="{service}"}}',
     "db_pool_size": 'payment_db_pool_size{{service="{service}"}}',
-    "db_pool_acquire_timeouts_total": 'increase(payment_db_pool_acquire_timeouts_total{{service="{service}"}}[2m])',
-    "upstream_connect_timeouts_total": 'increase(upstream_connect_timeouts_total{{service="{service}"}}[2m])',
+    "db_pool_acquire_timeouts_total": 'payment_db_pool_acquire_timeouts_total{{service="{service}"}}',
+    "upstream_connect_timeouts_total": 'upstream_connect_timeouts_total{{service="{service}"}}',
     "cpu_saturation": 'container_cpu_usage_seconds_total{{container="{service}"}}',
     "memory_usage": 'container_memory_usage_ratio{{container="{service}"}}',
     "container_restarts": 'container_restart_count{{container="{service}"}}',

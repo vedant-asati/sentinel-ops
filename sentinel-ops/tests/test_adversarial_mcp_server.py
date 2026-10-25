@@ -18,7 +18,7 @@ async def test_mcp_protocol_violation_missing_jsonrpc_spec():
 
     envelope = get_mcp_tools_envelope()
     assert "tools" in envelope
-    assert len(envelope["tools"]) == 4
+    assert len(envelope["tools"]) == 5
 
     # Verify JSON-RPC 2.0 initialize
     init_resp = await handle_jsonrpc_request({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
@@ -27,7 +27,7 @@ async def test_mcp_protocol_violation_missing_jsonrpc_spec():
 
     # Verify JSON-RPC tools/list
     list_resp = await handle_jsonrpc_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-    assert len(list_resp["result"]["tools"]) == 4
+    assert len(list_resp["result"]["tools"]) == 5
 
 
 def test_mcp_blast_radius_arbitrary_action_injection():

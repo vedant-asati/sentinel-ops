@@ -10,12 +10,13 @@ from typing import Any, Dict, List, Literal, Optional
 import yaml
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from sentinel_ops.agents.graph import compile_investigation_graph
 from sentinel_ops.agents.synthesizer import format_incident_brief
 from sentinel_ops.core.config import settings
+from sentinel_ops.mcp.server import handle_jsonrpc_request
 from sentinel_ops.memory.graph_rag import TopologyGraphRAG
 from sentinel_ops.dpo.trajectory_logger import DPOTrajectoryLogger
 
@@ -38,6 +39,7 @@ class BoundedLedger(dict):
         super().__setitem__(key, value)
 
 APPROVAL_LEDGER: BoundedLedger = BoundedLedger(maxsize=1000)
+RUN_HISTORY_LEDGER: BoundedLedger = BoundedLedger(maxsize=500)
 
 
 def load_fixture(case_id: str) -> Optional[Dict[str, Any]]:
@@ -105,9 +107,11 @@ async def stream_triage(
         if not fixture:
             raise HTTPException(status_code=404, detail=f"Case {case_id} not found")
 
+    run_id = uuid.uuid4().hex[:12]
+
     async def event_generator():
         try:
-            yield f"data: {json.dumps({'type': 'init', 'incident_id': fixture['id'], 'alert': fixture['alert_text']})}\n\n"
+            yield f"data: {json.dumps({'type': 'init', 'run_id': run_id, 'incident_id': fixture['id'], 'alert': fixture['alert_text']})}\n\n"
             await asyncio.sleep(0.15)
 
             # 1. GraphRAG Prior Knowledge
@@ -178,8 +182,12 @@ async def stream_triage(
             if adv:
                 yield f"data: {json.dumps({'type': 'adversarial', 'supported': adv.all_claims_supported, 'confidence': adv.confidence, 'critique': adv.critique_hint})}\n\n"
 
+            # Store completed state immutably for deterministic brief export without re-running
+            RUN_HISTORY_LEDGER[run_id] = dict(final_state)
+
             # 6. Emit Terminal & Blast Radius
             blast = {
+                "run_id": run_id,
                 "score": final_state.get("blast_radius_score", 0.0),
                 "callers": final_state.get("affected_callers", []),
                 "remediation": final_state.get("remediation_proposal"),
@@ -198,9 +206,27 @@ async def stream_triage(
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+@app.get("/api/runs/{run_id}/brief")
+async def export_stored_run_brief(run_id: str, fmt: Literal["markdown", "json"] = "markdown"):
+    """Exports Markdown or JSON brief directly from a completed immutable run in RUN_HISTORY_LEDGER."""
+    stored_state = RUN_HISTORY_LEDGER.get(run_id)
+    if not stored_state:
+        raise HTTPException(status_code=404, detail=f"Completed run '{run_id}' not found")
+    rendered = format_incident_brief(stored_state, fmt=fmt)
+    media = "application/json" if fmt == "json" else "text/markdown"
+    return PlainTextResponse(content=rendered, media_type=media)
+
+
 @app.get("/api/brief/{case_id}")
-async def get_incident_brief(case_id: str, fmt: Literal["markdown", "json"] = "markdown"):
-    """Generates a downloadable Read-Only Incident Brief for a fixture or live checkout sandbox."""
+async def get_incident_brief(
+    case_id: str,
+    fmt: Literal["markdown", "json"] = "markdown",
+    run_id: Optional[str] = None,
+):
+    """Generates or retrieves a Read-Only Incident Brief (exports stored state when run_id is given)."""
+    if run_id is not None:
+        return await export_stored_run_brief(run_id=run_id, fmt=fmt)
+
     if case_id == "__live__":
         now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         fixture = {
@@ -258,6 +284,18 @@ async def approve_remediation(case_id: str, req: ApprovalRequest):
     return {"status": "recorded", "ledger": APPROVAL_LEDGER[case_id]}
 
 
+@app.post("/mcp")
+async def mcp_jsonrpc_endpoint(request: Dict[str, Any]):
+    """HTTP JSON-RPC 2.0 transport endpoint for Model Context Protocol (MCP)."""
+    if not isinstance(request, dict) or request.get("jsonrpc") != "2.0" or "method" not in request:
+        return JSONResponse(
+            status_code=400,
+            content={"jsonrpc": "2.0", "id": request.get("id") if isinstance(request, dict) else None, "error": {"code": -32600, "message": "Invalid JSON-RPC 2.0 request"}},
+        )
+    resp = await handle_jsonrpc_request(request)
+    return JSONResponse(status_code=200, content=resp)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard():
     """Serves the zero-build Cyber Command Center single-page dashboard."""
@@ -298,6 +336,8 @@ async def get_dashboard():
                 <option value="case_05">Case 05: Gateway Configuration Drift (502 Bad Gateway)</option>
             </select>
             <button onclick="runTriage(document.getElementById('caseSelector').value)" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs px-3 py-1.5 rounded transition">RUN TRIAGE</button>
+            <button onclick="exportBrief('markdown')" class="bg-cyan-800 hover:bg-cyan-700 text-white text-xs px-3 py-1.5 rounded transition">EXPORT BRIEF (.MD)</button>
+            <button onclick="exportBrief('json')" class="bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs px-3 py-1.5 rounded border border-gray-700 transition">EXPORT BRIEF (.JSON)</button>
         </div>
     </header>
 
@@ -370,6 +410,7 @@ async def get_dashboard():
 
     <script>
         let currentCase = 'case_01';
+        let currentRunId = null;
 
         function escapeHtml(str) {
             if (!str) return '';
@@ -381,8 +422,21 @@ async def get_dashboard():
                 .replace(/'/g, '&#039;');
         }
 
+        function exportBrief(fmt) {
+            const url = currentRunId
+                ? `/api/runs/${encodeURIComponent(currentRunId)}/brief?fmt=${encodeURIComponent(fmt)}`
+                : `/api/brief/${encodeURIComponent(currentCase)}?fmt=${encodeURIComponent(fmt)}`;
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `${currentCase}_${currentRunId || 'latest'}_brief.${fmt === 'json' ? 'json' : 'md'}`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
         function runTriage(caseId) {
             currentCase = caseId;
+            currentRunId = null;
             const alertBox = document.getElementById('alertBox');
             const ragBox = document.getElementById('ragBox');
             const pipelineBox = document.getElementById('pipelineBox');
@@ -403,6 +457,7 @@ async def get_dashboard():
                 const msg = JSON.parse(e.data);
 
                 if (msg.type === 'init') {
+                    if (msg.run_id) currentRunId = msg.run_id;
                     alertBox.textContent = msg.alert;
                 } else if (msg.type === 'graph_rag') {
                     ragBox.innerHTML = msg.matches.map(m => 
@@ -429,6 +484,7 @@ async def get_dashboard():
                     </div>`;
                 } else if (msg.type === 'terminal') {
                     const data = msg.data;
+                    if (data.run_id) currentRunId = data.run_id;
                     if (data.terminal_status === 'INSUFFICIENT_EVIDENCE') {
                         let checksHtml = '';
                         if (data.next_discriminating_checks && data.next_discriminating_checks.length > 0) {

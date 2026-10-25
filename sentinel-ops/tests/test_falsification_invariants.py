@@ -11,7 +11,11 @@ from sentinel_ops.mcp.prometheus_adapter import PrometheusAdapter
 def test_run_isolation_instance_reuse():
     """P0 Probe: Ensure reusing an agent instance across runs never bleeds previous state."""
     cases = {c["id"]: c for c in load_fixtures()}
-    changed = dict(cases["case_01"], mock_telemetry=cases["case_02"]["mock_telemetry"])
+    changed = dict(
+        cases["case_01"],
+        incident_timestamp=cases["case_02"]["incident_timestamp"],
+        mock_telemetry=cases["case_02"]["mock_telemetry"],
+    )
     
     used = SentinelOpsLangGraphAgent()
     first_res = used.diagnose(cases["case_01"])
@@ -37,7 +41,7 @@ async def test_nan_metric_rejection():
                 "pricing-service": {
                     "latency_p95": {
                         "status": "SUCCESS",
-                        "values": [[1732468500, "NaN"]],
+                        "values": [[1795530750, "NaN"]],
                     }
                 }
             }
@@ -303,3 +307,126 @@ async def test_deadline_expiration_routes_to_operational_failure():
     res = await graph.ainvoke(initial_state, config=config)
     assert res["terminal_status"] == "OPERATIONAL_FAILURE"
     assert "deadline" in res["terminal_reason"].lower()
+
+
+@pytest.mark.asyncio
+async def test_p1_1_future_counter_outside_window_abstains():
+    """P1.1 Probe: Counter shifted +1h outside incident observation window [T-120s, T+180s] must abstain."""
+    from sentinel_ops.agents.graph import compile_investigation_graph
+
+    graph = compile_investigation_graph()
+    # Incident window at 14:32:00Z = [1795530600, 1795530900]; +3600s shifted samples = 1795534320/1795534350
+    future_state = {
+        "incident_id": "test_p1_1_future_counter",
+        "alert_text": "Payment DB timeouts",
+        "incident_timestamp": "2026-11-24T14:32:00Z",
+        "target_service": "checkout-service",
+        "simulated_telemetry": {
+            "prometheus": {
+                "payment-service": {
+                    "db_pool_active": {"status": "SUCCESS", "values": [[1795534320, "2.0"], [1795534350, "2.0"]]},
+                    "db_pool_size": {"status": "SUCCESS", "values": [[1795534320, "2.0"], [1795534350, "2.0"]]},
+                    "db_pool_acquire_timeouts_total": {"status": "SUCCESS", "values": [[1795534320, "2"], [1795534350, "15"]]},
+                }
+            },
+            "tempo": {},
+        },
+        "crag_iterations": 0,
+    }
+    res = await graph.ainvoke(future_state, config={"configurable": {"thread_id": "p1_1_future"}})
+    assert res["terminal_status"] == "INSUFFICIENT_EVIDENCE"
+
+
+@pytest.mark.asyncio
+async def test_p1_1_missing_requested_trace_id_with_decoy_abstains():
+    """P1.1 Probe: Missing requested trace_id must NOT substitute another trace in simulated_telemetry.tempo."""
+    from sentinel_ops.agents.graph import compile_investigation_graph
+
+    graph = compile_investigation_graph()
+    res = await graph.ainvoke(
+        {
+            "incident_id": "test_p1_1_missing_trace",
+            "alert_text": "Checkout timeout on trace_requested_missing",
+            "incident_timestamp": "2026-11-24T14:32:00Z",
+            "target_service": "checkout-service",
+            "trace_id": "trace_requested_missing",
+            "simulated_telemetry": {
+                "prometheus": {
+                    "payment-service": {
+                        "db_pool_active": {"status": "SUCCESS", "values": [[1795530720, "2.0"], [1795530735, "2.0"]]},
+                        "db_pool_size": {"status": "SUCCESS", "values": [[1795530720, "2.0"], [1795530735, "2.0"]]},
+                        "db_pool_acquire_timeouts_total": {"status": "SUCCESS", "values": [[1795530720, "2"], [1795530735, "11"]]},
+                    }
+                },
+                "tempo": {
+                    "trace_decoy_other": {
+                        "status": "SUCCESS",
+                        "timestamp": 1795530720,
+                        "spans": [
+                            {"span_id": "r", "parent_span_id": "", "service": "checkout-service", "name": "checkout", "duration_ms": 2000.0},
+                            {"span_id": "p", "parent_span_id": "r", "service": "payment-service", "name": "db.connection.acquire", "duration_ms": 1950.0, "error": "TimeoutError"},
+                        ],
+                    }
+                },
+            },
+            "crag_iterations": 0,
+        },
+        config={"configurable": {"thread_id": "p1_1_decoy"}},
+    )
+    assert res["terminal_status"] == "INSUFFICIENT_EVIDENCE"
+
+
+def test_p1_1_decision_gates_reject_stale_and_wrong_trace_evidence():
+    """P1.1 Probe: Direct checks at sufficiency and adversarial decision points reject stale/wrong-trace EvidenceItems."""
+    from sentinel_ops.agents.sufficiency import crag_sufficiency_node
+    from sentinel_ops.agents.adversarial import adversarial_reviewer_node
+    from sentinel_ops.agents.state import AtomicClaim, EvidenceItem, InvestigationState
+
+    stale_ev = EvidenceItem(
+        id="EV-prom-stale",
+        backend_source="prometheus",
+        query_string="payment_db_pool_active",
+        query_params={"service": "payment-service", "metric_type": "db_pool_active"},
+        observation_window=("2026-11-24T15:30:00Z", "2026-11-24T15:35:00Z"),
+        sample_or_span_ref="db_pool_active",
+        finding="saturated at 2.0 / 2.0",
+        raw_payload="2.0",
+        status="SUCCESS",
+    )
+    stale_wait = EvidenceItem(
+        id="EV-prom-stale-wait",
+        backend_source="prometheus",
+        query_string="payment_db_pool_acquire_timeouts_total",
+        query_params={"service": "payment-service", "metric_type": "db_pool_acquire_timeouts_total"},
+        observation_window=("2026-11-24T15:30:00Z", "2026-11-24T15:35:00Z"),
+        sample_or_span_ref="db_pool_acquire_timeouts_total",
+        finding="+10 acquire timeouts",
+        raw_payload="10",
+        status="SUCCESS",
+    )
+    decoy_trace = EvidenceItem(
+        id="EV-tempo-wrong",
+        backend_source="tempo",
+        query_string="trace_wrong",
+        query_params={"target_service": "checkout-service", "trace_id": "trace_wrong"},
+        observation_window=("2026-11-24T14:30:00Z", "2026-11-24T14:35:00Z"),
+        sample_or_span_ref="span_waterfall",
+        finding="TimeoutError in payment-service on db.connection.acquire",
+        raw_payload="...",
+        status="SUCCESS",
+    )
+    state = InvestigationState(
+        incident_id="gate_reject",
+        alert_text="Timeout",
+        incident_timestamp="2026-11-24T14:32:00Z",
+        target_service="checkout-service",
+        trace_id="trace_expected",
+        evidence=[stale_ev, stale_wait, decoy_trace],
+        structured_claims=[
+            AtomicClaim(claim_id="CL-1", statement="payment-service db_pool_exhaustion", claim_type="root_cause", cited_evidence_ids=["EV-prom-stale"])
+        ],
+    )
+    suff_res = crag_sufficiency_node(state)
+    assert suff_res["crag_sufficient"] is False
+    adv_res = adversarial_reviewer_node(state)
+    assert adv_res["adversarial_verdict"].all_claims_supported is False

@@ -79,6 +79,7 @@ class SentinelOpsLangGraphAgent:
             "terminal_reason": final_state.get("terminal_reason"),
             "claims": final_state.get("structured_claims", []),
             "evidence": final_state.get("evidence", []),
+            "queries_executed": len(final_state.get("evidence", [])),
             "blast_score": final_state.get("blast_radius_score", 0.0),
             "remediation": final_state.get("remediation_proposal", ""),
             "adversarial_verdict": final_state.get("adversarial_verdict"),
@@ -176,11 +177,23 @@ def run_benchmark(live_llm: bool = False) -> int:
     )
     abstention_pct = (correct_abstentions / len(abstention_cases) * 100.0) if abstention_cases else 0.0
 
+    sp_attempted = len(abstention_cases)
+    sp_provider_failures = sum(
+        1 for c in abstention_cases
+        if results[c["id"]]["single_pass"]["terminal_status"] == "OPERATIONAL_FAILURE"
+    )
+    sp_completed = sp_attempted - sp_provider_failures
     sp_hallucinations = sum(
         1 for c in abstention_cases
-        if results[c["id"]]["single_pass"]["terminal_status"] != "INSUFFICIENT_EVIDENCE"
+        if results[c["id"]]["single_pass"]["terminal_status"] == "SUPPORTED_DIAGNOSIS"
     )
-    sp_hallucination_pct = (sp_hallucinations / len(abstention_cases) * 100.0) if abstention_cases else 0.0
+    sp_hallucination_pct = (sp_hallucinations / sp_completed * 100.0) if sp_completed else 0.0
+
+    total_provider_failures = sum(
+        1 for c in cases
+        if results[c["id"]]["single_pass"]["terminal_status"] == "OPERATIONAL_FAILURE"
+    )
+    total_completed_sp = len(cases) - total_provider_failures
 
     total_claims = 0
     valid_citation_claims = 0
@@ -196,6 +209,10 @@ def run_benchmark(live_llm: bool = False) -> int:
 
     citation_pct = (valid_citation_claims / total_claims * 100.0) if total_claims else 100.0
     avg_latency_sec = (sum(latencies) / len(latencies)) if latencies else 0.0
+    avg_queries = (
+        sum(results[c["id"]]["agent"].get("queries_executed", len(results[c["id"]]["agent"].get("evidence", []))) for c in cases) / len(cases)
+        if cases else 0.0
+    )
     dora_summary = compute_dora_benchmark(
         agent_mttr_seconds=max(0.001, avg_latency_sec),
         citation_support_rate=citation_pct / 100.0,
@@ -204,9 +221,14 @@ def run_benchmark(live_llm: bool = False) -> int:
 
     console.print("\n[bold white]Measured Benchmark Results (Dynamically Evaluated):[/bold white]")
     console.print(f"  ✔ [green]Root-Cause Precision:[/green] {precision_pct:.1f}% ({correct_diagnoses}/{len(diagnosable_cases)} cases matched ground truth)")
-    console.print(f"  ✔ [green]Correct Abstention Rate:[/green] {abstention_pct:.1f}% ({correct_abstentions}/{len(abstention_cases)} withheld cases safely abstained; {baseline_col_title} guessed wrong {sp_hallucination_pct:.1f}%)")
+    if sp_completed == 0:
+        baseline_note = f"{baseline_col_title}: UNAVAILABLE (0/{len(cases)} completed; {total_provider_failures} provider failures)"
+    else:
+        baseline_note = f"{baseline_col_title} guessed wrong {sp_hallucination_pct:.1f}% ({sp_hallucinations}/{sp_completed} completed, {sp_provider_failures} failed)"
+    console.print(f"  ✔ [green]Correct Abstention Rate:[/green] {abstention_pct:.1f}% ({correct_abstentions}/{len(abstention_cases)} withheld cases safely abstained; {baseline_note})")
     console.print(f"  ✔ [green]Citation Contract Support:[/green] {citation_pct:.1f}% of claims cite verified [EV-xxx] observations")
     console.print(f"  ✔ [green]Measured Mean Triage Latency:[/green] {avg_latency_sec:.4f}s per case (vs. 2700s manual ref: {dora_summary.acceleration_factor:.0f}x)")
+    console.print(f"  ✔ [green]Mean Telemetry Queries Executed:[/green] {avg_queries:.1f} probes per case")
 
     if precision_pct < 100.0 or abstention_pct < 100.0 or citation_pct < 100.0:
         return 1

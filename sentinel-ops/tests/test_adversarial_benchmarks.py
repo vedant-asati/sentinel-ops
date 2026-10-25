@@ -153,3 +153,48 @@ class TestFixtureEdgeCases:
         # Values are lists of [int_ts, str_val] e.g. [1795530720, '2.0']
         val = values[0][1]
         assert isinstance(val, str), f"Expected string type in fixture, got {type(val)}"
+
+
+def test_runner_reports_unavailable_when_all_single_pass_llm_calls_fail(capsys, monkeypatch):
+    """Contract (P1.6): Provider failures must report UNAVAILABLE rather than 0/0 or false 0% hallucinations."""
+    from benchmarks import runner as r
+
+    async def _fail_sp(**kwargs):
+        return {
+            "terminal_status": "OPERATIONAL_FAILURE",
+            "diagnosed_root_cause": "unknown",
+            "mechanism": "none",
+            "failure_reason": "rate limit 429",
+            "structured_claims": [],
+            "evidence": [],
+        }
+
+    monkeypatch.setattr(r, "run_live_single_pass_gemini", _fail_sp)
+    monkeypatch.setattr(r, "DeterministicRuleBaseline", lambda: type("_DR", (), {
+        "diagnose": lambda self, c: {"terminal_status": "INSUFFICIENT_EVIDENCE", "diagnosed_root_cause": "unknown", "mechanism": "none", "structured_claims": [], "evidence": []}
+    })())
+
+    fixtures = r.load_fixtures()[:3]
+    gt_map = {c["id"]: c["ground_truth"] for c in fixtures}
+
+    class _FakeAgent:
+        def diagnose(self, case, resume_thread_id=None, use_llm=False):
+            gt = gt_map[case["id"]]
+            return {
+                "terminal_status": gt.get("expected_terminal_status", "INSUFFICIENT_EVIDENCE"),
+                "diagnosed_root_cause": gt.get("root_cause_service", "unknown"),
+                "mechanism": gt.get("mechanism", "none"),
+                "claims": [],
+                "evidence": [],
+                "elapsed_seconds": 0.01,
+            }
+
+    monkeypatch.setattr(r, "SentinelOpsLangGraphAgent", _FakeAgent)
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-key")
+    monkeypatch.setattr(r, "load_fixtures", lambda: fixtures)
+
+    rc = r.run_benchmark(live_llm=True)
+    assert rc == 0
+    captured = " ".join(capsys.readouterr().out.split())
+    assert "Live Gemini Single-Pass: UNAVAILABLE" in captured
+    assert "3 provider failures" in captured
