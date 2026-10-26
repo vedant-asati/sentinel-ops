@@ -114,6 +114,15 @@ def adversarial_reviewer_node(state: InvestigationState) -> Dict[str, Any]:
                     "checkout": ("checkout-service", "chec"),
                     "auth": ("auth-service", "auth"),
                 }
+                try:
+                    from sentinel_ops.profiles.registry import get_profile
+                    prof = get_profile(getattr(state, "profile_id", "checkout-demo"))
+                    for sname in prof.resolve_service_names():
+                        key = sname.lower()
+                        if key not in known_services:
+                            known_services[key] = (sname, key[:4])
+                except Exception:
+                    pass
                 services_in_stmt = [
                     (k, v[0], v[1]) for k, v in known_services.items() if k in stmt_norm
                 ]
@@ -162,6 +171,29 @@ def adversarial_reviewer_node(state: InvestigationState) -> Dict[str, Any]:
                 "supported": True,
                 "reason": "Citations verified against successful observation.",
             })
+
+    # Independent rule predicate verification whenever sufficiency diagnosed via shared Stage 2/3 typed rule evaluation
+    rule_eval_state = getattr(state, "rule_evaluation", None) or {}
+    if all_supported and rule_eval_state.get("is_sufficient") and state.observations:
+        try:
+            from sentinel_ops.profiles.registry import get_profile
+            from sentinel_ops.rules.engine import evaluate_all_rules
+            prof = get_profile(getattr(state, "profile_id", "checkout-demo"))
+            recheck = evaluate_all_rules(
+                profile=prof,
+                observations=state.observations,
+                explicit_trace_id=state.trace_id,
+                incident_timestamp=state.incident_timestamp,
+            )
+            if not recheck.is_sufficient or recheck.root_cause_service != rule_eval_state.get("root_cause_service"):
+                all_supported = False
+                claim_evals.append({
+                    "claim_id": "RULE-CHECK",
+                    "supported": False,
+                    "reason": f"Shared causal predicate failed verification ({'; '.join(recheck.gap_reasons) or 'preconditions unmet'}).",
+                })
+        except Exception:
+            pass
 
     critique = None if all_supported else "One or more claims cite inconclusive or failed evidence."
     supported_count = sum(1 for ev in claim_evals if ev["supported"])

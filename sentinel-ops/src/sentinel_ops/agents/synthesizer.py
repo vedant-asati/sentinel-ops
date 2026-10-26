@@ -86,15 +86,23 @@ def format_incident_brief(state: Dict[str, Any] | InvestigationState, fmt: str =
     brief_narrative = validate_brief_narrative(raw_narrative, cl_list, ev_list)
 
     if fmt == "json":
+        probe_attempts = data.get("probe_attempts") or []
         return json.dumps(
             {
+                "schema_version": "3.0",
                 "incident_id": incident_id,
+                "profile_id": data.get("profile_id", "checkout-demo"),
+                "environment": data.get("environment", "default"),
                 "target_service": target_service,
                 "incident_timestamp": data.get("incident_timestamp"),
                 "trace_id": data.get("trace_id"),
                 "terminal_status": status,
                 "root_cause_summary": brief_narrative if (brief_narrative and status == "SUPPORTED_DIAGNOSIS") else summary,
                 "mechanism": mechanism,
+                "planner_status": data.get("planner_status", "disabled"),
+                "localized_dependency": data.get("localized_dependency"),
+                "queries_executed": len(probe_attempts) if probe_attempts else len(ev_list),
+                "raw_payload_retention": data.get("raw_payload_retention", "sanitized"),
                 "claims": cl_list,
                 "evidence": ev_list,
                 "evidence_count": len(ev_list),
@@ -158,6 +166,77 @@ async def synthesizer_node(state: InvestigationState) -> Dict[str, Any]:
 
     evidence_list = state.evidence
     successful_items = {e.id: e for e in evidence_list if e.status == "SUCCESS"}
+
+    # Shared Stage 2/3 typed rule synthesis path (profile-agnostic across all migrated rules)
+    rule_eval = getattr(state, "rule_evaluation", None)
+    if rule_eval and rule_eval.get("is_sufficient"):
+        svc = rule_eval.get("root_cause_service") or state.target_service
+        mech = rule_eval.get("mechanism") or rule_eval.get("winning_rule") or "pool_acquisition_timeout"
+        obs_to_ev = {
+            e.query_params.get("observation_id"): e
+            for e in successful_items.values()
+            if e.query_params.get("observation_id")
+        }
+        cited_evs = [obs_to_ev[oid] for oid in rule_eval.get("supporting_observation_ids", []) if oid in obs_to_ev]
+        cited_ids = [e.id for e in cited_evs]
+        if cited_ids:
+            claims = [
+                AtomicClaim(
+                    claim_id="CL-001",
+                    statement=f"{svc} {mech} is the root cause of {state.target_service} degradation.",
+                    claim_type="root_cause",
+                    cited_evidence_ids=cited_ids,
+                ),
+                AtomicClaim(
+                    claim_id="CL-002",
+                    statement="; ".join(e.finding for e in cited_evs),
+                    claim_type="mechanism",
+                    cited_evidence_ids=cited_ids,
+                ),
+            ]
+            for f_oid in rule_eval.get("healthy_observation_ids", []):
+                h_ev = obs_to_ev.get(f_oid)
+                if h_ev is not None:
+                    claims.append(
+                        AtomicClaim(
+                            claim_id=f"CL-00{len(claims) + 1}",
+                            statement=f"Falsified competing hypothesis: {h_ev.finding}",
+                            claim_type="competing_hypothesis_falsified",
+                            cited_evidence_ids=[h_ev.id],
+                        )
+                    )
+            if mech == "cpu_contention":
+                summary = f"Root cause identified as {svc} CPU saturation contributing to latency spikes."
+            else:
+                summary = f"Root cause identified as {svc} {mech}."
+            next_checks = list(rule_eval.get("next_discriminating_checks") or [])
+            runbook_action = rule_eval.get("recommended_runbook_action")
+            brief_narrative = None
+            if state.use_llm and claims:
+                refined = await refine_brief_with_llm(
+                    alert_text=state.alert_text,
+                    target_service=state.target_service,
+                    verified_claims=[c.model_dump() for c in claims],
+                    evidence=[e.model_dump() for e in evidence_list],
+                    next_checks=next_checks,
+                    deadline_timestamp=state.deadline_timestamp,
+                )
+                if refined:
+                    brief_narrative = validate_brief_narrative(
+                        refined.executive_summary,
+                        [c.model_dump() for c in claims],
+                        [e.model_dump() for e in evidence_list],
+                    )
+                    if refined.prioritized_next_check and refined.prioritized_next_check not in next_checks:
+                        next_checks = [refined.prioritized_next_check] + next_checks
+            return {
+                "structured_claims": claims,
+                "root_cause_summary": summary,
+                "incident_brief_narrative": brief_narrative,
+                "mechanism": mech,
+                "next_discriminating_checks": next_checks,
+                "recommended_runbook_action": runbook_action,
+            }
 
     def is_payment(e):
         return e.query_params.get("service") == "payment-service" or "payment" in e.query_string or "payment" in e.id or "paym" in e.id

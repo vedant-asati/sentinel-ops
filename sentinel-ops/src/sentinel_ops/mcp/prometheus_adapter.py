@@ -25,10 +25,32 @@ METRIC_QUERY_TEMPLATES = {
 class PrometheusAdapter:
     """Server-enforced Prometheus adapter with persistent HTTP client and time-anchored bounded queries."""
 
-    def __init__(self, base_url: Optional[str] = None, timeout: Optional[float] = None):
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        timeout: Optional[float] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ):
         self.base_url = base_url or settings.PROMETHEUS_URL
         self.timeout = timeout or settings.PER_QUERY_TIMEOUT_SECONDS
-        self.client: httpx.AsyncClient = httpx.AsyncClient(timeout=self.timeout)
+        self.headers: Dict[str, str] = headers if headers is not None else self._load_default_headers()
+        self.verify: Any = settings.TELEMETRY_CA_BUNDLE or settings.TELEMETRY_TLS_VERIFY
+        self.client: httpx.AsyncClient = httpx.AsyncClient(
+            timeout=self.timeout,
+            headers=self.headers,
+            verify=self.verify,
+        )
+
+    @staticmethod
+    def _load_default_headers() -> Dict[str, str]:
+        if settings.PROMETHEUS_HEADERS_JSON:
+            try:
+                parsed = json.loads(settings.PROMETHEUS_HEADERS_JSON)
+                if isinstance(parsed, dict):
+                    return {str(k): str(v) for k, v in parsed.items()}
+            except Exception:
+                pass
+        return {}
 
     async def aclose(self) -> None:
         if self.client and not self.client.is_closed:
@@ -36,41 +58,39 @@ class PrometheusAdapter:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self.client is None or self.client.is_closed:
-            self.client = httpx.AsyncClient(timeout=self.timeout)
+            self.client = httpx.AsyncClient(
+                timeout=self.timeout,
+                headers=self.headers,
+                verify=self.verify,
+            )
         return self.client
 
     async def query_metric(
         self,
         service: str,
-        metric_type: Literal[
-            "error_rate",
-            "latency_p95",
-            "db_pool_active",
-            "db_pool_size",
-            "db_pool_acquire_timeouts_total",
-            "upstream_connect_timeouts_total",
-            "cpu_saturation",
-            "memory_usage",
-            "container_restarts",
-        ],
+        metric_type: str,
         window: Tuple[str, str],  # (start_iso, end_iso) anchored to T_incident
         step: str = "15s",
         max_series: int = 5,
         timeout_override: Optional[float] = None,
+        allowed_services: Optional[Tuple[str, ...]] = None,
+        promql_templates: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Queries Prometheus metrics over an anchored time window."""
-        if service not in ALLOWED_SERVICES:
+        eff_services = allowed_services if allowed_services is not None else ALLOWED_SERVICES
+        eff_templates = promql_templates if promql_templates is not None else METRIC_QUERY_TEMPLATES
+        if service not in eff_services:
             return {
                 "status": "TOOL_FAILURE",
-                "error": f"Service '{service}' is not in allowed services list: {ALLOWED_SERVICES}",
+                "error": f"Service '{service}' is not in allowed services list: {eff_services}",
                 "result": [],
                 "formatted": ""
             }
 
-        if metric_type not in METRIC_QUERY_TEMPLATES:
+        if metric_type not in eff_templates:
             return {
                 "status": "TOOL_FAILURE",
-                "error": f"Unknown metric type '{metric_type}'. Allowed: {list(METRIC_QUERY_TEMPLATES.keys())}",
+                "error": f"Unknown metric type '{metric_type}'. Allowed: {list(eff_templates.keys())}",
                 "result": [],
                 "formatted": ""
             }
@@ -88,7 +108,7 @@ class PrometheusAdapter:
         start_iso, end_iso = window
         # Sanitize step parameter against query string injection
         safe_step = re.sub(r"[^0-9a-zA-Z]", "", step) if step else "15s"
-        promql = METRIC_QUERY_TEMPLATES[metric_type].format(service=service)
+        promql = eff_templates[metric_type].format(service=service)
         effective_timeout = max(0.001, timeout_override) if timeout_override is not None else self.timeout
         client = self._get_client()
 

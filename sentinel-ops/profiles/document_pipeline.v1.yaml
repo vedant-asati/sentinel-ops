@@ -1,0 +1,109 @@
+profile_id: document-pipeline
+version: "1.0.0"
+environment: staging
+
+services:
+  document-api:
+    name: document-api
+    role: ingress
+    depends_on:
+      - render-worker
+      - storage-api
+    metrics:
+      - latency_p95
+      - error_rate
+  render-worker:
+    name: render-worker
+    role: worker
+    depends_on:
+      - storage-api
+    metrics:
+      - pool_active
+      - pool_acquire_timeouts
+      - upstream_connect_timeouts
+      - latency_p95
+      - cpu_utilization
+    replica_join_labels: [pod, instance, app]
+  storage-api:
+    name: storage-api
+    role: datastore
+    metrics:
+      - error_rate
+      - latency_p95
+      - upstream_connect_timeouts
+
+signals:
+  error_rate:
+    logical_signal: error_rate
+    metric_name: doc_http_errors_ratio
+    promql_template: 'doc_http_errors_ratio{{app="{service}"}}'
+    unit: ratio
+    value_kind: gauge
+  latency_p95:
+    logical_signal: latency_p95
+    metric_name: render_latency_p95
+    promql_template: 'histogram_quantile(0.95, sum by (le) (rate(doc_request_duration_seconds_bucket{{app="{service}"}}[1m])))'
+    unit: seconds
+    value_kind: histogram_quantile
+  pool_active:
+    logical_signal: pool_active
+    metric_name: worker_pool_busy
+    promql_template: 'worker_pool_busy{{app="{service}"}}'
+    unit: ratio
+    value_kind: ratio
+    capacity_signal: worker_pool_max
+    saturation_threshold: 0.95
+  pool_capacity:
+    logical_signal: pool_capacity
+    metric_name: worker_pool_max
+    promql_template: 'worker_pool_max{{app="{service}"}}'
+    unit: connections
+    value_kind: gauge
+  pool_acquire_timeouts:
+    logical_signal: pool_acquire_timeouts
+    metric_name: worker_pool_wait_timeouts_total
+    promql_template: 'worker_pool_wait_timeouts_total{{app="{service}"}}'
+    unit: timeouts
+    value_kind: counter_delta
+  upstream_connect_timeouts:
+    logical_signal: upstream_connect_timeouts
+    metric_name: storage_connect_timeouts_total
+    promql_template: 'storage_connect_timeouts_total{{app="{service}"}}'
+    unit: timeouts
+    value_kind: counter_delta
+  cpu_utilization:
+    logical_signal: cpu_utilization
+    metric_name: render_cpu_utilization
+    promql_template: 'render_cpu_utilization{{app="{service}"}}'
+    unit: ratio
+    value_kind: gauge
+    saturation_threshold: 0.85
+
+trace_contract:
+  operation_aliases:
+    pool_acquisition_timeout:
+      - pdf.pool.checkout
+    upstream_connect_timeout:
+      - storage.object.put
+  timeout_error_markers:
+    - TimeoutError
+    - PoolExhaustedError
+
+enabled_rules:
+  - pool_acquisition_timeout
+  - upstream_connect_timeout
+  - cpu_contention
+
+check_templates:
+  pool_acquisition_timeout:
+    - "Inspect render-worker connection pool semaphore limits and checkout wait queue depth for {service}"
+    - "Verify pdf.pool.checkout acquisition durations in distributed traces for {service}"
+  upstream_connect_timeout:
+    - "Inspect object store TCP connectivity and retry timeouts from {service}"
+  cpu_contention:
+    - "Capture CPU flamegraph during PDF rendering spikes on {service}"
+
+runbook_hints:
+  pool_acquisition_timeout: "kubectl set env deployment/{service} WORKER_POOL_SIZE=32"
+  upstream_connect_timeout: "kubectl rollout restart deployment/{service}"
+  cpu_contention: "kubectl scale deployment/{service} --replicas=4"

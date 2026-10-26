@@ -50,35 +50,57 @@ def run_triage(
     brief_format: str = "markdown",
     auto_approve: bool = False,
     export_dpo: bool = True,
+    profile_id: str = "checkout-demo",
+    environment: str = "default",
+    incident_timestamp: Optional[str] = None,
+    window_before_minutes: int = 2,
+    window_after_minutes: int = 3,
+    preflight: bool = False,
 ) -> Dict[str, Any]:
     """Executes end-to-end incident investigation triage with interactive Rich output."""
+    from sentinel_ops.profiles.registry import get_profile
+
+    profile = get_profile(profile_id)
+    if preflight:
+        pf = profile.preflight()
+        console.print(f"\n[bold cyan]SystemProfile Preflight:[/bold cyan] {profile.profile_id} (v{profile.version}, env={environment})")
+        for rule_id, res in pf.items():
+            console.print(f"  - {rule_id}: [bold]{res.status}[/bold] ({res.notes})")
+        return {"profile_id": profile.profile_id, "preflight": {k: v.model_dump() for k, v in pf.items()}}
+
     console.print("\n[bold cyan]════════════════════════════════════════════════════════════════════════════[/bold cyan]")
     console.print("[bold white]Sentinel-Ops Autonomous AI SRE: Incident Triage & Root Cause Analysis[/bold white]")
     console.print("[bold cyan]════════════════════════════════════════════════════════════════════════════[/bold cyan]\n")
 
     if live:
         incident_id = f"live_{datetime.now(timezone.utc).strftime('%H%M%S')}"
-        target_service = target_service or "checkout-service"
-        alert_text = alert_text or f"Alert: {target_service} p95 latency increased from 400ms to 4.5s; 504 errors on downstream dependencies."
-        incident_timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        default_svc = next(iter(profile.resolve_service_names()), "checkout-service")
+        target_service = target_service or default_svc
+        alert_text = alert_text or f"Alert: {target_service} latency/error anomaly detected in {profile.profile_id}."
+        incident_timestamp = incident_timestamp or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         mock_telemetry = None
-        console.print("[bold green]Mode:[/bold green] [bold cyan]LIVE TELEMETRY PROBING[/bold cyan] (Querying live Prometheus :59090 & Tempo :53201)\n")
+        console.print(f"[bold green]Mode:[/bold green] [bold cyan]LIVE TELEMETRY PROBING[/bold cyan] (profile={profile.profile_id})\n")
     else:
         fixture = load_fixture(case_id) if case_id else None
+        if fixture is None and case_id and Path(case_id).is_file():
+            with open(case_id, "r", encoding="utf-8") as fp:
+                fixture = yaml.safe_load(fp)
         if fixture:
             incident_id = fixture["id"]
             alert_text = fixture["alert_text"].strip()
-            incident_timestamp = fixture["incident_timestamp"]
-            target_service = fixture["target_service"]
+            incident_timestamp = incident_timestamp or fixture["incident_timestamp"]
+            target_service = target_service or fixture["target_service"]
             trace_id = trace_id or fixture.get("trace_id")
+            profile_id = fixture.get("profile_id", profile_id)
+            profile = get_profile(profile_id)
             mock_telemetry = fixture.get("mock_telemetry")
         else:
             incident_id = "default_case"
             alert_text = "checkout-service p95 latency increased from 400ms to 4.5s; 504 errors on downstream dependencies."
-            incident_timestamp = "2026-11-24T14:32:00Z"
-            target_service = "checkout-service"
+            incident_timestamp = incident_timestamp or "2026-11-24T14:32:00Z"
+            target_service = target_service or "checkout-service"
             mock_telemetry = None
-        console.print(f"[bold green]Mode:[/bold green] [bold yellow]REPLAY FIXTURE BENCHMARK[/bold yellow] (Case: {incident_id})\n")
+        console.print(f"[bold green]Mode:[/bold green] [bold yellow]REPLAY FIXTURE BENCHMARK[/bold yellow] (Case: {incident_id}, profile={profile.profile_id})\n")
 
     # Step 1: Incident Header Panel
     console.print(
@@ -92,9 +114,25 @@ def run_triage(
         )
     )
 
-    # Step 2: Topology-Aware GraphRAG Prior Knowledge
+    # Step 2 & 3: Unified InvestigationService Initialization & LangGraph Execution
+    from sentinel_ops.service.runner import InvestigationService
+
+    service = InvestigationService()
+    initial_state = service.build_initial_state(
+        incident_id=incident_id,
+        alert_text=alert_text,
+        incident_timestamp=incident_timestamp,
+        target_service=target_service,
+        profile_id=profile.profile_id,
+        environment=environment,
+        window_before_minutes=window_before_minutes,
+        window_after_minutes=window_after_minutes,
+        trace_id=trace_id,
+        use_llm=use_llm,
+        simulated_telemetry=mock_telemetry,
+    )
     console.print("[bold white]1. Topology-Aware GraphRAG Historical Retrieval:[/bold white]")
-    graph_rag = TopologyGraphRAG()
+    graph_rag = TopologyGraphRAG(profile=profile)
     historical_matches = graph_rag.retrieve(
         alert_text=alert_text,
         target_service=target_service,
@@ -107,7 +145,6 @@ def run_triage(
     rag_table.add_column("Root Cause Service", style="yellow", width=18)
     rag_table.add_column("Composite Score", style="bold green", width=16)
 
-    rag_context = []
     for match in historical_matches:
         pm = match["postmortem"]
         rag_table.add_row(
@@ -116,32 +153,13 @@ def run_triage(
             pm.root_cause_service,
             f"{match['composite_score']:.3f} (Sim: {match['sim_score']:.2f}, Topo: {match['topo_score']:.2f})",
         )
-        rag_context.append({
-            "incident_id": pm.incident_id,
-            "title": pm.title,
-            "service": pm.root_cause_service,
-            "composite_score": match["composite_score"],
-        })
     console.print(rag_table)
 
-    # Step 3: Run Compiled LangGraph Agent Machine
     console.print("\n[bold white]2. Multi-Agent Reasoning Execution (LangGraph):[/bold white]")
     with console.status("[bold green]Orchestrating supervisor, specialists, CRAG gate & adversarial skeptic...[/bold green]"):
-        graph = compile_investigation_graph()
-        initial_state = {
-            "incident_id": incident_id,
-            "alert_text": alert_text,
-            "incident_timestamp": incident_timestamp,
-            "target_service": target_service,
-            "trace_id": trace_id,
-            "use_llm": use_llm,
-            "historical_context": rag_context,
-            "simulated_telemetry": mock_telemetry,
-            "deadline_timestamp": time.monotonic() + settings.RUN_DEADLINE_SECONDS,
-            "crag_iterations": 0,
-        }
-        config = {"configurable": {"thread_id": f"cli_{incident_id}_{uuid.uuid4().hex[:8]}"}}
-        final_state = asyncio.run(graph.ainvoke(initial_state, config=config))
+        final_state = asyncio.run(
+            service.execute_state_sync(initial_state, thread_id=f"cli_{incident_id}_{uuid.uuid4().hex[:8]}")
+        )
 
     terminal_status = final_state.get("terminal_status", "OPERATIONAL_FAILURE")
 
@@ -312,21 +330,29 @@ def main() -> int:
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
     parser = argparse.ArgumentParser(description="Sentinel-Ops AI SRE Investigation CLI")
-    parser.add_argument("--case-id", default=None, choices=["case_01", "case_02", "case_03", "case_04", "case_05"], help="Replay case ID (cannot be combined with --live)")
+    parser.add_argument("--case-id", default=None, help="Replay case ID or YAML fixture path (cannot be combined with --live)")
     parser.add_argument("--live", action="store_true", help="Execute triage against live Prometheus/Tempo endpoints instead of replay fixtures")
+    parser.add_argument("--profile", default="checkout-demo", help="SystemProfile ID or path (e.g., checkout-demo, document-pipeline)")
+    parser.add_argument("--env", default="default", help="Scoped deployment environment identifier")
+    parser.add_argument("--alert-time", default=None, help="Historical alert timestamp in ISO-8601 UTC (overrides current clock in --live mode)")
+    parser.add_argument("--window-before", type=int, default=2, help="Minutes before alert-time to query (default: 2)")
+    parser.add_argument("--window-after", type=int, default=3, help="Minutes after alert-time to query (default: 3)")
+    parser.add_argument("--preflight", action="store_true", help="Check SystemProfile signal readiness without executing triage")
     parser.add_argument("--use-llm", action="store_true", help="Enable bounded Gemini 3.5 Flash Lite Neuro-Symbolic query planning")
-    parser.add_argument("--target-service", default="checkout-service", help="Target service for live investigation")
+    parser.add_argument("--target-service", default=None, help="Target service for investigation")
     parser.add_argument("--trace-id", default=None, help="Explicit distributed trace ID to inspect")
     parser.add_argument("--export-brief", default=None, help="Write Read-Only Incident Brief to Markdown or JSON file")
     parser.add_argument("--brief-format", default="markdown", choices=["markdown", "json"], help="Format for --export-brief")
     parser.add_argument("--auto-approve", action="store_true", help="Bypass interactive HITL approval prompt")
+    parser.add_argument("--export-dpo", action="store_true", help="Opt-in DPO trajectory export")
     parser.add_argument("--no-dpo", action="store_true", help="Disable DPO trajectory export")
 
     args = parser.parse_args()
     if args.live and args.case_id is not None:
         parser.error("Cannot combine --live with --case-id; specify either live probing or a replay fixture.")
 
-    resolved_case_id = None if args.live else (args.case_id or "case_01")
+    resolved_case_id = None if (args.live or args.preflight) else (args.case_id or "case_01")
+    should_export_dpo = bool(args.export_dpo) and not bool(args.no_dpo)
     try:
         final_state = run_triage(
             case_id=resolved_case_id,
@@ -337,9 +363,18 @@ def main() -> int:
             export_brief=args.export_brief,
             brief_format=args.brief_format,
             auto_approve=args.auto_approve,
-            export_dpo=not args.no_dpo,
+            export_dpo=should_export_dpo,
+            profile_id=args.profile,
+            environment=args.env,
+            incident_timestamp=args.alert_time,
+            window_before_minutes=args.window_before,
+            window_after_minutes=args.window_after,
+            preflight=args.preflight,
         )
     except BrokenPipeError:
+        return 0
+
+    if args.preflight:
         return 0
 
     status = final_state.get("terminal_status", "OPERATIONAL_FAILURE")

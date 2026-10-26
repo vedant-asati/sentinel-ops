@@ -30,46 +30,40 @@ class SentinelOpsLangGraphAgent:
     """
 
     def __init__(self):
+        from sentinel_ops.service.runner import InvestigationService
+        self.service = InvestigationService()
         self.graph = compile_investigation_graph()
         self.rag = TopologyGraphRAG()
 
     def diagnose(self, case: Dict[str, Any], resume_thread_id: str | None = None, use_llm: bool = False) -> Dict[str, Any]:
-        matches = self.rag.retrieve(
+        initial_state = self.service.build_initial_state(
+            incident_id=case["id"],
             alert_text=case.get("alert_text", ""),
-            target_service=case.get("target_service", "checkout-service"),
             incident_timestamp=case.get("incident_timestamp", "2026-11-24T14:32:00Z"),
-            top_k=2,
+            target_service=case.get("target_service", "checkout-service"),
+            profile_id=case.get("profile_id", "checkout-demo"),
+            trace_id=case.get("trace_id"),
+            use_llm=use_llm,
+            simulated_telemetry=case.get("mock_telemetry"),
         )
-        rag_context = [
-            {"incident_id": m["postmortem"].incident_id, "title": m["postmortem"].title, "service": m["postmortem"].root_cause_service}
-            for m in matches
-        ]
-        initial_state = {
-            "incident_id": case["id"],
-            "alert_text": case.get("alert_text", ""),
-            "incident_timestamp": case.get("incident_timestamp", "2026-11-24T14:32:00Z"),
-            "target_service": case.get("target_service", "checkout-service"),
-            "trace_id": case.get("trace_id"),
-            "historical_context": rag_context,
-            "simulated_telemetry": case.get("mock_telemetry"),
-            "use_llm": use_llm,
-            "crag_iterations": 0,
-        }
         thread_id = resume_thread_id or f"{case.get('id', 'bench')}_{uuid.uuid4().hex[:8]}"
-        config = {"configurable": {"thread_id": thread_id}}
         t0 = time.perf_counter()
-        final_state = asyncio.run(self.graph.ainvoke(initial_state, config=config))
+        final_state = asyncio.run(self.service.execute_state_sync(initial_state, thread_id=thread_id))
         elapsed_s = time.perf_counter() - t0
 
         diag_svc = "unknown"
         if final_state.get("terminal_status") == "SUPPORTED_DIAGNOSIS":
-            claims = final_state.get("structured_claims") or []
-            root_claim_text = " ".join(c.statement for c in claims if getattr(c, "claim_type", None) == "root_cause")
-            source_text = root_claim_text or final_state.get("root_cause_summary", "")
-            for svc in ("payment-service", "pricing-service", "cart-service"):
-                if svc in source_text:
-                    diag_svc = svc
-                    break
+            rule_eval = final_state.get("rule_evaluation") or {}
+            if rule_eval.get("root_cause_service"):
+                diag_svc = rule_eval["root_cause_service"]
+            else:
+                claims = final_state.get("structured_claims") or []
+                root_claim_text = " ".join(c.statement for c in claims if getattr(c, "claim_type", None) == "root_cause")
+                source_text = root_claim_text or final_state.get("root_cause_summary", "")
+                for svc in ("payment-service", "pricing-service", "cart-service"):
+                    if svc in source_text:
+                        diag_svc = svc
+                        break
 
         return {
             "agent": "sentinel_ops_langgraph",
@@ -79,7 +73,7 @@ class SentinelOpsLangGraphAgent:
             "terminal_reason": final_state.get("terminal_reason"),
             "claims": final_state.get("structured_claims", []),
             "evidence": final_state.get("evidence", []),
-            "queries_executed": len(final_state.get("evidence", [])),
+            "queries_executed": len(final_state.get("probe_attempts") or final_state.get("evidence", [])),
             "blast_score": final_state.get("blast_radius_score", 0.0),
             "remediation": final_state.get("remediation_proposal", ""),
             "adversarial_verdict": final_state.get("adversarial_verdict"),

@@ -11,6 +11,15 @@ class Settings(BaseSettings):
     # Telemetry backend endpoints (Server-side enforced only)
     PROMETHEUS_URL: str = "http://localhost:59090"
     TEMPO_URL: str = "http://localhost:53201"
+    PROMETHEUS_HEADERS_JSON: str = ""
+    TEMPO_HEADERS_JSON: str = ""
+    TELEMETRY_TLS_VERIFY: bool = True
+    TELEMETRY_CA_BUNDLE: str = ""
+
+    # Persistence & operational controls
+    RUN_STORE_PATH: str = ""
+    SENTINEL_ENV_SCOPE: str = ""
+    SENTINEL_REDACT_RAW_PAYLOADS: bool = False
     
     # Deadlines and timeouts (seconds)
     RUN_DEADLINE_SECONDS: float = 30.0

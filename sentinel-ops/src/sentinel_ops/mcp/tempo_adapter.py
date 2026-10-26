@@ -116,10 +116,32 @@ def _extract_service_name(attributes: Any) -> str:
 class TempoAdapter:
     """Server-enforced Tempo distributed trace adapter with persistent HTTP client."""
 
-    def __init__(self, base_url: Optional[str] = None, timeout: Optional[float] = None):
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        timeout: Optional[float] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ):
         self.base_url = base_url or settings.TEMPO_URL
         self.timeout = timeout or settings.PER_QUERY_TIMEOUT_SECONDS
-        self.client: httpx.AsyncClient = httpx.AsyncClient(timeout=self.timeout)
+        self.headers: Dict[str, str] = headers if headers is not None else self._load_default_headers()
+        self.verify: Any = settings.TELEMETRY_CA_BUNDLE or settings.TELEMETRY_TLS_VERIFY
+        self.client: httpx.AsyncClient = httpx.AsyncClient(
+            timeout=self.timeout,
+            headers=self.headers,
+            verify=self.verify,
+        )
+
+    @staticmethod
+    def _load_default_headers() -> Dict[str, str]:
+        if settings.TEMPO_HEADERS_JSON:
+            try:
+                parsed = json.loads(settings.TEMPO_HEADERS_JSON)
+                if isinstance(parsed, dict):
+                    return {str(k): str(v) for k, v in parsed.items()}
+            except Exception:
+                pass
+        return {}
 
     async def aclose(self) -> None:
         if self.client and not self.client.is_closed:
@@ -127,7 +149,11 @@ class TempoAdapter:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self.client is None or self.client.is_closed:
-            self.client = httpx.AsyncClient(timeout=self.timeout)
+            self.client = httpx.AsyncClient(
+                timeout=self.timeout,
+                headers=self.headers,
+                verify=self.verify,
+            )
         return self.client
 
     async def search_traces(

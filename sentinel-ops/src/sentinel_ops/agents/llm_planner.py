@@ -25,33 +25,29 @@ class AsyncRateLimiter:
         self._last_call: float = 0.0
         self._lock: Optional[asyncio.Lock] = None
 
-    async def acquire(self) -> None:
+    async def acquire(self, deadline_timestamp: Optional[float] = None) -> bool:
+        """Waits cleanly for rate-limit slot unless waiting would breach deadline_timestamp."""
         if self._lock is None:
             self._lock = asyncio.Lock()
         async with self._lock:
             now = time.monotonic()
-            wait = self.min_interval_sec - (now - self._last_call)
-            if wait > 0 and self._last_call > 0:
+            wait = (self.min_interval_sec - (now - self._last_call)) if self._last_call > 0 else 0.0
+            if deadline_timestamp is not None:
+                rem_after_wait = deadline_timestamp - (now + max(0.0, wait))
+                if rem_after_wait <= 1.0:
+                    return False
+            if wait > 0:
                 await asyncio.sleep(wait)
             self._last_call = time.monotonic()
+            return True
 
 
 _GEMINI_RATE_LIMITER = AsyncRateLimiter(min_interval_sec=4.2)
 
 
 class PlannedMetricProbe(BaseModel):
-    service: Literal["checkout-service", "cart-service", "pricing-service", "payment-service"]
-    metric_type: Literal[
-        "error_rate",
-        "latency_p95",
-        "db_pool_active",
-        "db_pool_size",
-        "db_pool_acquire_timeouts_total",
-        "upstream_connect_timeouts_total",
-        "cpu_saturation",
-        "memory_usage",
-        "container_restarts",
-    ]
+    service: str
+    metric_type: str
     rationale: str = Field(description="Why this signal discriminates competing hypotheses")
 
 
@@ -88,7 +84,8 @@ async def refine_brief_with_llm(
     if remaining <= 1.0:
         return None
 
-    await _GEMINI_RATE_LIMITER.acquire()
+    if not await _GEMINI_RATE_LIMITER.acquire(deadline_timestamp=deadline_timestamp):
+        return None
     remaining = (deadline_timestamp - time.monotonic()) if deadline_timestamp else settings.PER_LLM_TIMEOUT_SECONDS
     if remaining <= 1.0:
         return None
@@ -117,6 +114,8 @@ async def plan_probes_with_llm(
     historical_context: List[Dict[str, Any]],
     dependencies: List[str],
     deadline_timestamp: Optional[float] = None,
+    allowed_services: Optional[List[str]] = None,
+    allowed_signals: Optional[List[str]] = None,
 ) -> Optional[LLMInvestigationPlan]:
     """Uses Gemini (gemini-3.5-flash-lite) to prioritize competing hypotheses and metric probes."""
     if not settings.GEMINI_API_KEY:
@@ -126,18 +125,33 @@ async def plan_probes_with_llm(
     if remaining <= 1.0:
         return None
 
-    await _GEMINI_RATE_LIMITER.acquire()
+    if not await _GEMINI_RATE_LIMITER.acquire(deadline_timestamp=deadline_timestamp):
+        return None
     remaining = (deadline_timestamp - time.monotonic()) if deadline_timestamp else settings.PER_LLM_TIMEOUT_SECONDS
     if remaining <= 1.0:
         return None
 
+    svc_list = allowed_services or list(dict.fromkeys([target_service] + list(dependencies)))
+    sig_list = allowed_signals or [
+        "error_rate",
+        "latency_p95",
+        "db_pool_active",
+        "db_pool_size",
+        "db_pool_acquire_timeouts_total",
+        "upstream_connect_timeouts_total",
+        "cpu_saturation",
+        "memory_usage",
+        "container_restarts",
+    ]
     prompt = (
         f"You are an SRE Incident Investigation Planner.\n"
         f"Alert on '{target_service}': {alert_text}\n"
+        f"Allowed services: {svc_list}\n"
+        f"Allowed metric signals: {sig_list}\n"
         f"Direct dependencies: {dependencies}\n"
         f"GraphRAG historical precedents: {json.dumps(historical_context[:2])}\n\n"
-        "Output at most 4 competing hypotheses and up to 6 priority metric probes "
-        "that best discriminate between pool exhaustion, RPC connect timeouts, CPU latency, and memory OOM."
+        "Output at most 4 competing hypotheses and up to 6 priority metric probes using ONLY the allowed services and metric signals "
+        "that best discriminate candidate failure mechanisms."
     )
 
     try:
@@ -145,6 +159,12 @@ async def plan_probes_with_llm(
         structured = llm.with_structured_output(LLMInvestigationPlan)
         timeout = min(settings.PER_LLM_TIMEOUT_SECONDS, max(1.0, remaining))
         result = await asyncio.wait_for(structured.ainvoke(prompt), timeout=timeout)
+        if result and result.probes:
+            filtered = [
+                p for p in result.probes
+                if p.service in svc_list and p.metric_type in sig_list
+            ]
+            return LLMInvestigationPlan(hypotheses=result.hypotheses, probes=filtered)
         return result
     except Exception as exc:
         logger.warning("LLM query planner unavailable (%s); using deterministic topology fallback.", exc)

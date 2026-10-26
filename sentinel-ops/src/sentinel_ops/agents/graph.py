@@ -25,11 +25,38 @@ def supported_diagnosis_node(state: InvestigationState) -> Dict[str, Any]:
 
 
 def insufficient_evidence_node(state: InvestigationState) -> Dict[str, Any]:
-    """Terminal state: Abstention due to missing, inconclusive, or refuted telemetry."""
+    """Terminal state: Abstention due to missing, inconclusive, or refuted telemetry with localization checks."""
     logger.warning("Terminal reached: INSUFFICIENT_EVIDENCE (Abstaining) for %s", state.incident_id)
+    checks: list[str] = list(state.next_discriminating_checks or [])
+    if not checks:
+        for obs in state.observations:
+            if getattr(obs, "backend_source", None) == "tempo" and obs.status == "SUCCESS":
+                bsvc = getattr(obs, "bottleneck_service", None)
+                bop = getattr(obs, "bottleneck_operation", None) or "slow_span"
+                bdur = getattr(obs, "bottleneck_duration_ms", 0.0)
+                if bsvc:
+                    checks.append(
+                        f"Trace {obs.trace_id} localized bottleneck to {bsvc} ({bop}, {bdur:.1f}ms exclusive); inspect logs, pool waits, and saturation counters on {bsvc}."
+                    )
+            elif getattr(obs, "join_status", None) in ("unjoinable", "missing_denominator"):
+                checks.append(
+                    f"Repair metric replica label alignment or missing capacity denominator for {obs.service} {obs.signal_name}."
+                )
+            elif getattr(obs, "counter_reset_detected", False):
+                checks.append(
+                    f"Inspect replica counter reset on {obs.service} {obs.signal_name} [{obs.join_key}] within incident window."
+                )
+        for hint in state.missing_evidence_hints or []:
+            if hint not in checks:
+                checks.append(hint)
+        if not checks:
+            checks.append(
+                f"Verify telemetry scrape coverage and trace context propagation for {state.target_service}."
+            )
     return {
         "terminal_status": "INSUFFICIENT_EVIDENCE",
         "terminal_reason": "Telemetry signals were missing, inconclusive, or failed entailment review. Refusing ungrounded hypothesis.",
+        "next_discriminating_checks": checks,
     }
 
 

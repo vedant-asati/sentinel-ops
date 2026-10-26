@@ -2,8 +2,10 @@ import networkx as nx
 from typing import Any, Dict, List
 
 
-def build_service_graph() -> nx.DiGraph:
-    """Builds microservices dependency directed graph: caller -> dependency."""
+def build_service_graph(profile: Any = None) -> nx.DiGraph:
+    """Builds microservices dependency directed graph from a SystemProfile or default checkout graph."""
+    if profile is not None and hasattr(profile, "build_service_graph"):
+        return profile.build_service_graph()
     g = nx.DiGraph()
     g.add_edge("checkout-service", "cart-service")
     g.add_edge("checkout-service", "pricing-service")
@@ -12,9 +14,13 @@ def build_service_graph() -> nx.DiGraph:
     return g
 
 
-def calculate_reverse_blast_radius(target_service: str, action: str = "restart") -> Dict[str, Any]:
+def calculate_reverse_blast_radius(
+    target_service: str,
+    action: str = "restart",
+    profile: Any = None,
+) -> Dict[str, Any]:
     """Traverses UPSTREAM callers (ancestors) to calculate impact of modifying target_service."""
-    graph = build_service_graph()
+    graph = profile.build_service_graph() if profile is not None else build_service_graph()
     
     if target_service not in graph:
         return {
@@ -39,7 +45,8 @@ def calculate_reverse_blast_radius(target_service: str, action: str = "restart")
         
     affected_callers = sorted(list(nx.ancestors(graph, target_service)))
     downstream_dependencies = sorted(list(nx.descendants(graph, target_service)))
-    caller_ratio = min(1.0, len(affected_callers) / 4.0)
+    denom = max(1, len(graph.nodes) - 1) if profile is not None else 4.0
+    caller_ratio = min(1.0, len(affected_callers) / denom)
     # Public ingress services with zero upstream callers still carry downstream customer exposure on disruptive actions
     is_public_ingress = len(affected_callers) == 0 and len(downstream_dependencies) > 0 and action != "config_reload"
     ingress_exposure = min(0.5, len(downstream_dependencies) * 0.12) if is_public_ingress else 0.0
@@ -69,35 +76,46 @@ MECHANISM_TO_ACTION: Dict[str, str] = {
     "config_drift_connection_refused": "config_reload",
     "memory_leak_oomkill": "restart",
     "cpu_algorithmic_latency": "restart",
+    "cpu_contention": "restart",
 }
 
 
 def blast_radius_node(state: Any) -> Dict[str, Any]:
     """Calculates upstream blast radius for the diagnosed root cause service."""
-    root_cause_service = "checkout-service"
+    from sentinel_ops.profiles.registry import get_profile
+
+    profile_id = getattr(state, "profile_id", "checkout-demo")
+    try:
+        profile = get_profile(profile_id)
+        known_services = profile.resolve_service_names()
+    except Exception:
+        profile = None
+        known_services = ("payment-service", "pricing-service", "cart-service")
+
+    rule_eval = getattr(state, "rule_evaluation", None) or {}
+    root_cause_service = rule_eval.get("root_cause_service") or getattr(state, "target_service", "checkout-service")
     mechanism = getattr(state, "mechanism", None)
     action = MECHANISM_TO_ACTION.get(mechanism, "restart") if mechanism else "restart"
 
-    for claim in state.structured_claims:
-        if claim.claim_type == "root_cause":
-            stmt = claim.statement.lower()
-            if "payment-service" in stmt:
-                root_cause_service = "payment-service"
-            elif "pricing-service" in stmt:
-                root_cause_service = "pricing-service"
-            elif "cart-service" in stmt:
-                root_cause_service = "cart-service"
+    if not rule_eval.get("root_cause_service"):
+        for claim in state.structured_claims:
+            if claim.claim_type == "root_cause":
+                stmt = claim.statement.lower()
+                for svc in known_services:
+                    if svc.lower() in stmt:
+                        root_cause_service = svc
+                        break
 
-            if not mechanism:
-                if "database connection pool" in stmt or "db_pool" in stmt or "pool_acquisition_timeout" in stmt:
-                    action = "db_pool_resize"
-                elif "config" in stmt or "drift" in stmt or "connection failure" in stmt or "refused" in stmt or "upstream_connect_timeout" in stmt:
-                    action = "config_reload"
-                elif "memory" in stmt or "oom" in stmt or "cpu" in stmt:
-                    action = "restart"
-            break
+                if not mechanism:
+                    if "database connection pool" in stmt or "db_pool" in stmt or "pool_acquisition_timeout" in stmt:
+                        action = "db_pool_resize"
+                    elif "config" in stmt or "drift" in stmt or "connection failure" in stmt or "refused" in stmt or "upstream_connect_timeout" in stmt:
+                        action = "config_reload"
+                    elif "memory" in stmt or "oom" in stmt or "cpu" in stmt:
+                        action = "restart"
+                break
 
-    res = calculate_reverse_blast_radius(root_cause_service, action=action)
+    res = calculate_reverse_blast_radius(root_cause_service, action=action, profile=profile)
     proposal = f"Advisory check on '{root_cause_service}' ({action}): {res['summary']}"
     return {
         "affected_callers": res["affected_callers"],

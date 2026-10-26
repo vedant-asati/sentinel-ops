@@ -97,9 +97,20 @@ class TopologyGraphRAG:
         w_graph: float = 0.3,
         w_decay: float = 0.2,
         tau_days: float = 90.0,
+        profile: Optional[Any] = None,
     ):
-        self.postmortems = postmortems or list(PRESEEDED_POSTMORTEMS)
-        self.graph = graph or build_service_graph()
+        if postmortems is not None:
+            self.postmortems = postmortems
+        elif profile is not None and getattr(profile, "profile_id", "checkout-demo") != "checkout-demo":
+            self.postmortems = [PostmortemIncident(**pm) for pm in getattr(profile, "postmortems", [])]
+        else:
+            self.postmortems = list(PRESEEDED_POSTMORTEMS)
+        if graph is not None:
+            self.graph = graph
+        elif profile is not None:
+            self.graph = build_service_graph(profile=profile)
+        else:
+            self.graph = build_service_graph()
         self.w_sim = w_sim
         self.w_graph = w_graph
         self.w_decay = w_decay

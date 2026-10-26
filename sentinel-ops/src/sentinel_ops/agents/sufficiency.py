@@ -29,6 +29,46 @@ def crag_sufficiency_node(state: InvestigationState) -> Dict[str, Any]:
     logger.info("Evaluating CRAG sufficiency (iteration %d)...", state.crag_iterations)
 
     evidence_list = state.evidence
+    from sentinel_ops.profiles.registry import get_profile
+    from sentinel_ops.rules.engine import evaluate_all_rules
+
+    try:
+        profile = get_profile(getattr(state, "profile_id", "checkout-demo"))
+    except Exception:
+        profile = None
+
+    if profile is not None and state.observations:
+        rule_eval = evaluate_all_rules(
+            profile=profile,
+            observations=state.observations,
+            explicit_trace_id=state.trace_id,
+            incident_timestamp=state.incident_timestamp,
+        )
+        new_iteration = state.crag_iterations + 1
+        loc_dict = rule_eval.localization.model_dump() if rule_eval.localization else None
+        if rule_eval.is_sufficient:
+            return {
+                "crag_iterations": new_iteration,
+                "crag_sufficient": True,
+                "missing_evidence_hints": [],
+                "rule_evaluation": rule_eval.model_dump(),
+                "localized_dependency": loc_dict,
+                "next_discriminating_checks": rule_eval.next_discriminating_checks,
+            }
+        has_success_obs = any(o.status == "SUCCESS" for o in state.observations)
+        has_preseeded_ev = any(e.status == "SUCCESS" for e in state.evidence)
+        if profile.profile_id != "checkout-demo" or has_success_obs or not has_preseeded_ev:
+            hints = list(rule_eval.gap_reasons) or [
+                "Telemetric signals inconclusive: neither primary cause nor causal mechanism substantiated."
+            ]
+            return {
+                "crag_iterations": new_iteration,
+                "crag_sufficient": False,
+                "missing_evidence_hints": hints,
+                "localized_dependency": loc_dict,
+                "next_discriminating_checks": rule_eval.next_discriminating_checks,
+            }
+
     successful_items = [
         e for e in evidence_list
         if e.status == "SUCCESS" and _evidence_in_incident_window(e, state.incident_timestamp)
