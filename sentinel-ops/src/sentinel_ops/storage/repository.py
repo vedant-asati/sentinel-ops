@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 from pathlib import Path
 import sqlite3
 import threading
-from typing import Any, Dict, List, Literal, Optional, Protocol
+from typing import Any, Dict, Iterator, List, Literal, Optional, Protocol
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 RunLifecycleStatus = Literal["PENDING", "RUNNING", "COMPLETED", "CANCELED", "FAILED"]
+
+
+class IdempotencyConflictError(ValueError):
+    """Raised when an idempotency key is reused with a different request payload."""
 
 
 class RunRecord(BaseModel):
@@ -19,6 +27,8 @@ class RunRecord(BaseModel):
 
     run_id: str
     case_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    request_fingerprint: Optional[str] = None
     environment: str = "default"
     profile_id: str = "checkout-demo"
     profile_version: str = "1.0.0"
@@ -46,7 +56,10 @@ class ApprovalRecord(BaseModel):
 
 def parse_exported_brief(raw_json: str) -> Dict[str, Any]:
     """Reads exported JSON incident briefs cleanly across v2 (unversioned) and v3 formats."""
-    data = json.loads(raw_json)
+    try:
+        data = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Malformed exported brief JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise ValueError("Exported brief must be a JSON object.")
     if "schema_version" not in data:
@@ -63,6 +76,8 @@ class RunRepository(Protocol):
 
     def create_run(self, record: RunRecord) -> None: ...
     def get_run(self, run_id: str) -> Optional[RunRecord]: ...
+    def get_by_idempotency_key(self, environment: str, key: str) -> Optional[RunRecord]: ...
+    def recover_interrupted_runs(self, completed_at: str) -> int: ...
     def mark_running(self, run_id: str) -> bool: ...
     def append_event(self, run_id: str, event_payload: Dict[str, Any]) -> int: ...
     def list_events_after(self, run_id: str, last_seq: int = 0) -> List[Dict[str, Any]]: ...
@@ -88,19 +103,56 @@ class MemoryRunRepository:
         self.maxsize = maxsize
         self._lock = threading.Lock()
         self._runs: Dict[str, RunRecord] = {}
+        self._idempotency: Dict[tuple[str, str], str] = {}
         self._approvals: Dict[str, ApprovalRecord] = {}
 
     def create_run(self, record: RunRecord) -> None:
         with self._lock:
+            if record.idempotency_key:
+                key = (record.environment, record.idempotency_key)
+                if key in self._idempotency:
+                    existing = self._runs.get(self._idempotency[key])
+                    if existing and existing.request_fingerprint != record.request_fingerprint:
+                        raise IdempotencyConflictError("Idempotency-Key reused with different request payload.")
             if len(self._runs) >= self.maxsize and record.run_id not in self._runs:
                 oldest = next(iter(self._runs))
-                del self._runs[oldest]
+                old_rec = self._runs.pop(oldest)
+                if old_rec.idempotency_key:
+                    self._idempotency.pop((old_rec.environment, old_rec.idempotency_key), None)
             self._runs[record.run_id] = record
+            if record.idempotency_key:
+                self._idempotency[(record.environment, record.idempotency_key)] = record.run_id
 
     def get_run(self, run_id: str) -> Optional[RunRecord]:
         with self._lock:
             rec = self._runs.get(run_id)
             return rec.model_copy(deep=True) if rec else None
+
+    def get_by_idempotency_key(self, environment: str, key: str) -> Optional[RunRecord]:
+        with self._lock:
+            rid = self._idempotency.get((environment, key))
+            rec = self._runs.get(rid) if rid else None
+            return rec.model_copy(deep=True) if rec else None
+
+    def recover_interrupted_runs(self, completed_at: str) -> int:
+        with self._lock:
+            count = 0
+            for rec in self._runs.values():
+                if rec.status in ("PENDING", "RUNNING"):
+                    rec.status = "FAILED"
+                    rec.completed_at = completed_at
+                    rec.final_state = {
+                        "incident_id": rec.case_id or rec.run_id,
+                        "profile_id": rec.profile_id,
+                        "environment": rec.environment,
+                        "terminal_status": "OPERATIONAL_FAILURE",
+                        "terminal_reason": "Interrupted by server restart prior to completion.",
+                        "root_cause_summary": "Run interrupted by server restart.",
+                    }
+                    seq = len(rec.events) + 1
+                    rec.events.append({"seq": seq, "data": {"type": "error", "error": "Interrupted by server restart prior to completion."}})
+                    count += 1
+            return count
 
     def mark_running(self, run_id: str) -> bool:
         with self._lock:
@@ -179,18 +231,28 @@ class SQLiteRunRepository:
         self._lock = threading.Lock()
         self._init_schema()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=5.0, check_same_thread=False)
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_schema(self) -> None:
         with self._lock, self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS runs (
                     run_id TEXT PRIMARY KEY,
                     case_id TEXT,
+                    idempotency_key TEXT,
+                    request_fingerprint TEXT,
                     environment TEXT NOT NULL,
                     profile_id TEXT NOT NULL,
                     profile_version TEXT NOT NULL,
@@ -220,20 +282,39 @@ class SQLiteRunRepository:
                 );
                 """
             )
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+            if "idempotency_key" not in cols:
+                conn.execute("ALTER TABLE runs ADD COLUMN idempotency_key TEXT")
+            if "request_fingerprint" not in cols:
+                conn.execute("ALTER TABLE runs ADD COLUMN request_fingerprint TEXT")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_env_idemp ON runs(environment, idempotency_key) WHERE idempotency_key IS NOT NULL"
+            )
 
     def create_run(self, record: RunRecord) -> None:
         with self._lock, self._connect() as conn:
+            if record.idempotency_key:
+                existing = conn.execute(
+                    "SELECT run_id, request_fingerprint FROM runs WHERE environment = ? AND idempotency_key = ?",
+                    (record.environment, record.idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    if existing["request_fingerprint"] != record.request_fingerprint:
+                        raise IdempotencyConflictError("Idempotency-Key reused with different request payload.")
+                    return
             conn.execute(
                 """
                 INSERT INTO runs (
-                    run_id, case_id, environment, profile_id, profile_version,
-                    schema_version, status, created_at, completed_at,
-                    final_state_json, brief_markdown, brief_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    run_id, case_id, idempotency_key, request_fingerprint, environment,
+                    profile_id, profile_version, schema_version, status, created_at,
+                    completed_at, final_state_json, brief_markdown, brief_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.run_id,
                     record.case_id,
+                    record.idempotency_key,
+                    record.request_fingerprint,
                     record.environment,
                     record.profile_id,
                     record.profile_version,
@@ -247,30 +328,96 @@ class SQLiteRunRepository:
                 ),
             )
 
+    @staticmethod
+    def _safe_json_loads(raw: Optional[str], context: str) -> Any:
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            logger.warning("Corrupted JSON detected in SQLite (%s): %s", context, exc)
+            return {"corrupted_payload": True, "error": str(exc)}
+
+    def _row_to_record(self, conn: sqlite3.Connection, row: sqlite3.Row) -> RunRecord:
+        ev_rows = conn.execute(
+            "SELECT seq, payload_json FROM run_events WHERE run_id = ? ORDER BY seq ASC",
+            (row["run_id"],),
+        ).fetchall()
+        events = []
+        for r in ev_rows:
+            parsed = self._safe_json_loads(r["payload_json"], f"run_events:{row['run_id']}:{r['seq']}")
+            events.append({"seq": r["seq"], "data": parsed if isinstance(parsed, dict) else {"raw": str(parsed)}})
+        final_state = self._safe_json_loads(row["final_state_json"], f"runs:{row['run_id']}")
+        return RunRecord(
+            run_id=row["run_id"],
+            case_id=row["case_id"],
+            idempotency_key=row["idempotency_key"],
+            request_fingerprint=row["request_fingerprint"],
+            environment=row["environment"],
+            profile_id=row["profile_id"],
+            profile_version=row["profile_version"],
+            schema_version=row["schema_version"],
+            status=row["status"],
+            created_at=row["created_at"],
+            completed_at=row["completed_at"],
+            final_state=final_state if isinstance(final_state, dict) else None,
+            brief_markdown=row["brief_markdown"],
+            brief_json=row["brief_json"],
+            events=events,
+        )
+
     def get_run(self, run_id: str) -> Optional[RunRecord]:
         with self._lock, self._connect() as conn:
             row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
             if row is None:
                 return None
-            ev_rows = conn.execute(
-                "SELECT seq, payload_json FROM run_events WHERE run_id = ? ORDER BY seq ASC",
-                (run_id,),
+            return self._row_to_record(conn, row)
+
+    def get_by_idempotency_key(self, environment: str, key: str) -> Optional[RunRecord]:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM runs WHERE environment = ? AND idempotency_key = ?",
+                (environment, key),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_record(conn, row)
+
+    def recover_interrupted_runs(self, completed_at: str) -> int:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT run_id, case_id, profile_id, environment FROM runs WHERE status IN ('PENDING', 'RUNNING')"
             ).fetchall()
-            return RunRecord(
-                run_id=row["run_id"],
-                case_id=row["case_id"],
-                environment=row["environment"],
-                profile_id=row["profile_id"],
-                profile_version=row["profile_version"],
-                schema_version=row["schema_version"],
-                status=row["status"],
-                created_at=row["created_at"],
-                completed_at=row["completed_at"],
-                final_state=json.loads(row["final_state_json"]) if row["final_state_json"] else None,
-                brief_markdown=row["brief_markdown"],
-                brief_json=row["brief_json"],
-                events=[{"seq": r["seq"], "data": json.loads(r["payload_json"])} for r in ev_rows],
-            )
+            if not rows:
+                return 0
+            for r in rows:
+                rid = r["run_id"]
+                err_state = {
+                    "incident_id": r["case_id"] or rid,
+                    "profile_id": r["profile_id"],
+                    "environment": r["environment"],
+                    "terminal_status": "OPERATIONAL_FAILURE",
+                    "terminal_reason": "Interrupted by server restart prior to completion.",
+                    "root_cause_summary": "Run interrupted by server restart.",
+                }
+                conn.execute(
+                    """
+                    UPDATE runs
+                    SET status = 'FAILED', completed_at = ?, final_state_json = ?
+                    WHERE run_id = ? AND status IN ('PENDING', 'RUNNING')
+                    """,
+                    (completed_at, json.dumps(err_state), rid),
+                )
+                seq_row = conn.execute(
+                    "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM run_events WHERE run_id = ?",
+                    (rid,),
+                ).fetchone()
+                seq = int(seq_row["max_seq"]) + 1 if seq_row else 1
+                conn.execute(
+                    "INSERT INTO run_events (run_id, seq, payload_json) VALUES (?, ?, ?)",
+                    (rid, seq, json.dumps({"type": "error", "error": "Interrupted by server restart prior to completion."})),
+                )
+            return len(rows)
 
     def mark_running(self, run_id: str) -> bool:
         with self._lock, self._connect() as conn:
@@ -299,7 +446,11 @@ class SQLiteRunRepository:
                 "SELECT seq, payload_json FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq ASC",
                 (run_id, last_seq),
             ).fetchall()
-            return [{"seq": r["seq"], "data": json.loads(r["payload_json"])} for r in rows]
+            out: List[Dict[str, Any]] = []
+            for r in rows:
+                parsed = self._safe_json_loads(r["payload_json"], f"run_events:{run_id}:{r['seq']}")
+                out.append({"seq": r["seq"], "data": parsed if isinstance(parsed, dict) else {"raw": str(parsed)}})
+            return out
 
     def commit_terminal(
         self,

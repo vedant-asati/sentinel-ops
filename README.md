@@ -4,9 +4,9 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-orange.svg)](https://github.com/langchain-ai/langgraph)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Challenge Gate: 40/40](https://img.shields.io/badge/Challenge_Gate-40%2F40_Passing-brightgreen.svg)](#-benchmark-replay-matrix)
+[![Challenge Gate: 84/84](https://img.shields.io/badge/Challenge_Gate-84%2F84_Passing-brightgreen.svg)](#-benchmark-replay-matrix)
 
-> **Sentinel-Ops** is a neuro-symbolic Site Reliability Engineering (SRE) **Read-Only Incident Brief & Observability Contract Platform** built on **LangGraph**, **FastMCP 2024-11-05 tool schemas**, a **Docker Compose microservices & OTLP/Prometheus chaos sandbox**, **Topology-Aware GraphRAG**, **CRAG sufficiency gating**, **Cold-Slate Formal Verification**, and bounded **`gemini-3.5-flash-lite` planning**.
+> **Sentinel-Ops** is a neuro-symbolic Site Reliability Engineering (SRE) **Read-Only Incident Brief & Observability Contract Platform** built on **LangGraph**, **profile-driven FastMCP 2024-11-05 tool schemas**, a **Docker Compose microservices & OTLP/Prometheus chaos sandbox**, **Topology-Aware GraphRAG**, **CRAG sufficiency gating**, **Independent Claim & Span Verification**, and optional bounded **`gemini-3.5-flash-lite` planning**.
 
 ---
 
@@ -82,7 +82,7 @@
 
 4. **Indirect Prompt-Injection Firewall:** Fences all untrusted telemetry inside `<telemetry>` non-executable blocks, strips null bytes, defangs escape tags, and scrubs Bearer tokens, JWTs, and passwords.
 
-5. **Direct Preference Optimization (DPO) Trajectory Pipeline:** Exports pairwise $(y_w, y_l)$ execution trajectories directly to `data/dpo/trajectories.jsonl`, pairing verified grounded reasoning against baseline hallucinations.
+5. **Opt-In DPO Trajectory Export (Deferred):** Offline `--export-dpo` writes pairwise $(y_w, y_l)$ trajectories cleanly on explicit opt-in without affecting runtime triage.
 
 6. **Reverse Upstream Blast Radius Traversal:** When proposing action on dependency $D$, impact affects upstream callers. Causal impact is calculated using upstream ancestors `nx.ancestors(graph, target_service)` rather than naive descendants.
 
@@ -90,20 +90,19 @@
 
 ## 📊 Benchmark Replay & Counterfactual Challenge Matrix
 
-Sentinel-Ops is evaluated across **40 seeded blind counterfactual cases** (`benchmarks.challenge_gate`) plus a **5-case replay suite** contrasting our gated LangGraph agent against deterministic threshold rules and an offline ungrounded heuristic comparator (or an unconstrained live `gemini-3.5-flash-lite` single-pass baseline when invoked with `--live-llm`):
+Sentinel-Ops is evaluated in **Pilot Scope** (causal certification enabled for verified timeout-family mechanisms with explicit claim scopes, strict replica joins, partial-coverage disclosure, and safe localization + abstention elsewhere) across **84 seeded blind counterfactual cases** (`benchmarks.challenge_gate`) plus a **5-case replay suite**:
 
-| Case ID | Incident Ground Truth | Deterministic Rules | Ungrounded Heuristic | Sentinel-Ops Agent |
-| :--- | :--- | :--- | :--- | :--- |
-| **`case_01`** | `payment-service` (DB pool exhaustion) | `payment-service` [SUPP] | `payment-service` [SUPP] | **`payment-service` (SUPPORTED)** |
-| **`case_02`** | `pricing-service` (CPU latency spike) | `pricing-service` [SUPP] | `pricing-service` [SUPP] | **`pricing-service` (SUPPORTED)** |
-| **`case_03`** | `unknown` (Telemetry signal withheld) | `unknown` [INSU] | `checkout-service` [SUPP] *(Guessed!)* | **`ABSTAINED` (INSUFFICIENT)** |
-| **`case_04`** | `cart-service` (Memory leak & OOM killer) | `cart-service` [SUPP] | `cart-service` [SUPP] | **`cart-service` (SUPPORTED)** |
-| **`case_05`** | `payment-service` (Config drift / 502 Gateway) | `payment-service` [SUPP] | `payment-service` [SUPP] | **`payment-service` (SUPPORTED)** |
+| Case ID | Incident Ground Truth | Pilot Behavior |
+| :--- | :--- | :--- |
+| **`case_01`** | `payment-service` (DB pool exhaustion) | **`payment-service` (`SUPPORTED_DIAGNOSIS`, scope=`service_fleet`)** |
+| **`case_02`** | `pricing-service` (CPU latency spike) | **Localizes `pricing-service` + safe abstention (`INSUFFICIENT_EVIDENCE`, pilot scope)** |
+| **`case_03`** | `unknown` (Telemetry signal withheld) | **Abstains cleanly (`INSUFFICIENT_EVIDENCE`)** |
+| **`case_04`** | `cart-service` (Memory pressure / restarts) | **Abstains cleanly without leak/OOM overclaim (`INSUFFICIENT_EVIDENCE`)** |
+| **`case_05`** | `payment-service` (Error rate / downstream span) | **Localizes `payment-service` + safe abstention without config-drift guess (`INSUFFICIENT_EVIDENCE`)** |
 
 **Verified Benchmark & Gate Metrics:**
-- **Counterfactual Challenge Gate:** **40/40 passed** (8 diagnosable positive cases grounded cleanly, 0 false support on withheld/stale/wrong-service/non-finite/flat-counter controls).
-- **Replay Suite Precision & Abstention:** **100% Root-Cause Precision (4/4)**, **100% Correct Abstention (1/1)**, **100% Citation Contract Adherence**.
-- **Measured Offline Replay Latency:** ~**0.04s per case** in symbolic offline mode (vs. an illustrative 45-minute manual runbook baseline; `--live-llm` adds bounded Gemini API round-trip latency respecting `15 RPM / 500 RPD` quotas).
+- **Counterfactual Challenge Gate:** **84/84 passed** across timeout positives, multi-span localization, 6-pod truncation disclosure, cross-pod service-label collapse, raw & in-range cumulative CPU counter rejection, conflicting retries, and stale/outage controls.
+- **Empirical Replay Latency & Probe Budget:** Measured ~**0.04s–0.15s per offline replay case** with tracked per-run `ProbeAttempt` counts (`--live-llm` compares optional LLM planning under identical probe budgets).
 
 ---
 

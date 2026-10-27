@@ -16,46 +16,52 @@ from sentinel_ops.telemetry.models import NormalizedMetricObservation
 
 
 @pytest.mark.asyncio
-async def test_stage3_document_pipeline_cpu_contention_honest_phrasing():
-    """Coarse CPU saturation + slow render span diagnoses `cpu_contention` cleanly without inventing algorithmic sub-cause."""
+async def test_stage3_document_pipeline_cpu_contention_localized_abstention_in_pilot_and_calibrated_experimental(monkeypatch):
+    """In pilot mode CPU contention localizes render-worker and abstains; with experimental flag it uses honest phrasing."""
+    from sentinel_ops.core.config import settings
+
     graph = compile_investigation_graph()
     tid = "a1" * 16
-    state = await graph.ainvoke(
-        {
-            "incident_id": "doc_cpu_01",
-            "profile_id": "document-pipeline",
-            "alert_text": f"Document rendering latency spiked on {tid}",
-            "incident_timestamp": "2026-11-24T16:00:00Z",
-            "target_service": "document-api",
-            "trace_id": tid,
-            "simulated_telemetry": {
-                "prometheus": {
-                    "render-worker": {
-                        "render_latency_p95": {"status": "SUCCESS", "result": [{"metric": {"pod": "rw-0"}, "values": [[1795536000, "2.8"]]}]},
-                        "render_cpu_utilization": {"status": "SUCCESS", "result": [{"metric": {"pod": "rw-0"}, "values": [[1795536000, "0.94"]]}]},
-                    }
-                },
-                "tempo": {
-                    tid: {
-                        "status": "SUCCESS",
-                        "timestamp": 1795536015,
-                        "spans": [
-                            {"span_id": "r", "parent_span_id": "", "service": "document-api", "name": "POST /render", "duration_ms": 2900.0},
-                            {"span_id": "w", "parent_span_id": "r", "service": "render-worker", "name": "pdf.rasterize", "duration_ms": 2800.0},
-                        ],
-                    }
-                },
+    payload = {
+        "incident_id": "doc_cpu_01",
+        "profile_id": "document-pipeline",
+        "alert_text": f"Document rendering latency spiked on {tid}",
+        "incident_timestamp": "2026-11-24T16:00:00Z",
+        "target_service": "document-api",
+        "trace_id": tid,
+        "simulated_telemetry": {
+            "prometheus": {
+                "render-worker": {
+                    "render_latency_p95": {"status": "SUCCESS", "result": [{"metric": {"pod": "rw-0"}, "values": [[1795536000, "2.8"]]}]},
+                    "render_cpu_utilization": {"status": "SUCCESS", "result": [{"metric": {"pod": "rw-0"}, "values": [[1795536000, "0.94"]]}]},
+                }
             },
-            "crag_iterations": 0,
+            "tempo": {
+                tid: {
+                    "status": "SUCCESS",
+                    "timestamp": 1795536015,
+                    "spans": [
+                        {"span_id": "r", "parent_span_id": "", "service": "document-api", "name": "POST /render", "duration_ms": 2900.0},
+                        {"span_id": "w", "parent_span_id": "r", "service": "render-worker", "name": "pdf.rasterize", "duration_ms": 2800.0},
+                    ],
+                }
+            },
         },
-        config={"configurable": {"thread_id": "doc_cpu_01"}},
-    )
+        "crag_iterations": 0,
+    }
 
-    assert state["terminal_status"] == "SUPPORTED_DIAGNOSIS"
-    assert state["mechanism"] == "cpu_contention"
-    assert state["rule_evaluation"]["root_cause_service"] == "render-worker"
-    assert "algorithmic" not in state["root_cause_summary"].lower()
-    assert "CPU saturation" in state["root_cause_summary"]
+    pilot_state = await graph.ainvoke(payload, config={"configurable": {"thread_id": "doc_cpu_pilot"}})
+    assert pilot_state["terminal_status"] == "INSUFFICIENT_EVIDENCE"
+    assert pilot_state["localized_dependency"]["bottleneck_service"] == "render-worker"
+    assert any("render-worker" in c for c in pilot_state["next_discriminating_checks"])
+
+    monkeypatch.setattr(settings, "EXPERIMENTAL_RULES_ENABLED", True)
+    exp_state = await graph.ainvoke(payload, config={"configurable": {"thread_id": "doc_cpu_exp"}})
+    assert exp_state["terminal_status"] == "SUPPORTED_DIAGNOSIS"
+    assert exp_state["mechanism"] == "cpu_contention"
+    assert exp_state["rule_evaluation"]["root_cause_service"] == "render-worker"
+    assert "algorithmic" not in exp_state["root_cause_summary"].lower()
+    assert "CPU saturation" in exp_state["root_cause_summary"]
 
 
 @pytest.mark.asyncio

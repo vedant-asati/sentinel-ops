@@ -216,13 +216,39 @@ def test_evidence_id_collision_silently_drops_critical_metric():
     assert merged[0].sample_or_span_ref == "db_pool_active"
     assert "saturated" in merged[0].finding
 
-    # Consequences on Sufficiency: requires both saturated pool AND wait contention (P1.3)
+    # Consequences on Sufficiency: requires typed observations with both saturated pool AND wait contention (P1.3)
+    from sentinel_ops.telemetry.models import NormalizedMetricObservation
+
+    win = ("2026-11-24T14:30:00Z", "2026-11-24T14:35:00Z")
+    pool_obs = NormalizedMetricObservation(
+        observation_id="OBS-pay-pool",
+        attempt_id="a1",
+        service="payment-service",
+        signal_name="db_pool_active",
+        value=0.98,
+        join_status="single_series",
+        requested_window=win,
+        status="SUCCESS",
+        finding="payment_db_pool_active saturated at 98.0 / 100.0 (98% capacity exhausted)",
+    )
+    wait_obs = NormalizedMetricObservation(
+        observation_id="OBS-pay-wait",
+        attempt_id="a2",
+        service="payment-service",
+        signal_name="db_pool_acquire_timeouts_total",
+        value=12.0,
+        delta=12.0,
+        sample_timestamps=(1795530720.0, 1795530750.0),
+        requested_window=win,
+        status="SUCCESS",
+        finding="payment-service db_pool_acquire_timeouts_total spiked with delta +12 timeouts",
+    )
     wait_item = EvidenceItem(
         id="EV-prom-paym-wait",
         backend_source="prometheus",
         query_string="payment-service_db_pool_acquire_timeouts_total",
         query_params={"service": "payment-service", "metric_type": "db_pool_acquire_timeouts_total"},
-        observation_window=("2026-11-24T14:30:00Z", "2026-11-24T14:35:00Z"),
+        observation_window=win,
         sample_or_span_ref="db_pool_acquire_timeouts_total",
         finding="payment-service db_pool_acquire_timeouts_total spiked with delta +12 timeouts",
         raw_payload="",
@@ -234,6 +260,7 @@ def test_evidence_id_collision_silently_drops_critical_metric():
         incident_timestamp="2026-11-24T14:30:00Z",
         target_service="checkout-service",
         evidence=merged + [wait_item],
+        observations=[pool_obs, wait_obs],
     )
     suff = crag_sufficiency_node(state)
     assert suff["crag_sufficient"] is True

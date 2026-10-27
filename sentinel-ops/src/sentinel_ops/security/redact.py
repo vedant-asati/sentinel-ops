@@ -15,6 +15,7 @@ _JWT_PATTERN = re.compile(r"eyJ[a-zA-Z0-9_-]{5,}\.eyJ[a-zA-Z0-9_-]{5,}\.[a-zA-Z0
 
 # Cloud & high-value credentials
 _AWS_KEY_PATTERN = re.compile(r"\b(AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b")
+_OPENAI_KEY_PATTERN = re.compile(r"\bsk-(?:proj-|live-)?[A-Za-z0-9_-]{12,}\b")
 _GH_PAT_PATTERN = re.compile(r"\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,255}\b")
 _SLACK_TOKEN_PATTERN = re.compile(r"\bxox[baprs]-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*\b")
 _PRIVATE_KEY_PATTERN = re.compile(r"-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9_-]+ )?PRIVATE KEY-----")
@@ -32,6 +33,8 @@ _PHONE_PATTERN = re.compile(r"(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s
 
 def scrub_credentials(text: str) -> str:
     """Redacts Bearer tokens, JWTs, cloud keys, database URIs, PII, and credentials from telemetry text."""
+    if not text or not isinstance(text, str):
+        return text
     text = _PRIVATE_KEY_PATTERN.sub("[REDACTED_PRIVATE_KEY]", text)
     text = _BEARER_PATTERN.sub("Bearer [REDACTED_TOKEN]", text)
     text = _BASIC_PATTERN.sub("Basic [REDACTED_BASIC_AUTH]", text)
@@ -39,6 +42,7 @@ def scrub_credentials(text: str) -> str:
     text = _OAUTH_HEADER_PATTERN.sub("OAuth [REDACTED_TOKEN]", text)
     text = _JWT_PATTERN.sub("[REDACTED_JWT]", text)
     text = _AWS_KEY_PATTERN.sub("[REDACTED_AWS_KEY]", text)
+    text = _OPENAI_KEY_PATTERN.sub("[REDACTED_API_KEY]", text)
     text = _GH_PAT_PATTERN.sub("[REDACTED_GITHUB_TOKEN]", text)
     text = _SLACK_TOKEN_PATTERN.sub("[REDACTED_SLACK_TOKEN]", text)
     text = _DB_URI_PATTERN.sub(r"\1:[REDACTED_PASSWORD]@\3", text)

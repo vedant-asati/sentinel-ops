@@ -2,9 +2,70 @@
 
 from __future__ import annotations
 
+import math
+import re
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 import networkx as nx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+_CUMULATIVE_SUFFIXES = ("_total", "_seconds_total", "_bytes_total", "_timeouts")
+_KNOWN_CUMULATIVE_NAMES = {"packet_drops", "dropped_packets", "timeouts", "timeout_drops", "connection_drops", "restarts", "container_restarts"}
+_RATE_CALL_RE = re.compile(r"\b(?:rate|irate|increase)\s*\([^)]*\)", re.IGNORECASE)
+_RATE_EXPR_RE = re.compile(r"\b(rate|irate|increase)\s*\(", re.IGNORECASE)
+
+_DURATION_MULTIPLIERS: Dict[str, float] = {
+    "": 1.0,
+    "s": 1.0,
+    "sec": 1.0,
+    "secs": 1.0,
+    "second": 1.0,
+    "seconds": 1.0,
+    "ms": 1e-3,
+    "msec": 1e-3,
+    "millisecond": 1e-3,
+    "milliseconds": 1e-3,
+    "us": 1e-6,
+    "usec": 1e-6,
+    "microsecond": 1e-6,
+    "microseconds": 1e-6,
+    "ns": 1e-9,
+    "nsec": 1e-9,
+    "nanosecond": 1e-9,
+    "nanoseconds": 1e-9,
+}
+
+
+def normalize_duration_to_seconds(value: float, unit: str = "") -> float:
+    """Converts a duration measurement in s/ms/us/ns to canonical seconds."""
+    mult = _DURATION_MULTIPLIERS.get((unit or "").strip().lower(), 1.0)
+    return float(value) * mult
+
+
+def is_cumulative_counter_metric(
+    promql: str = "",
+    signal_name: str = "",
+    labels: Optional[Dict[str, str]] = None,
+    value_kind: Optional[str] = None,
+) -> bool:
+    """Returns True if metadata/PromQL indicates an un-normalized cumulative counter."""
+    lbls = labels or {}
+    if str(lbls.get("__type__", "")).lower() == "counter" or str(lbls.get("metric_kind", "")).lower() == "counter":
+        if not promql or not _RATE_EXPR_RE.search(promql):
+            return True
+    name_to_check = str(lbls.get("__name__") or signal_name or "").strip().lower()
+    if promql:
+        # Remove wrapped rate()/irate()/increase() subexpressions before inspecting bare tokens
+        unwrapped = _RATE_CALL_RE.sub(" ", promql)
+        tokens = re.findall(r"[A-Za-z_:][A-Za-z0-9_:]*", unwrapped)
+        if any(t.lower().endswith(_CUMULATIVE_SUFFIXES) or t.lower() in _KNOWN_CUMULATIVE_NAMES for t in tokens):
+            return True
+    if value_kind != "gauge":
+        if (name_to_check.endswith(_CUMULATIVE_SUFFIXES) or name_to_check in _KNOWN_CUMULATIVE_NAMES) and (
+            not promql or not _RATE_EXPR_RE.search(promql)
+        ):
+            return True
+    return False
 
 
 class SignalMapping(BaseModel):
@@ -18,6 +79,31 @@ class SignalMapping(BaseModel):
     capacity_signal: Optional[str] = None
     saturation_threshold: Optional[float] = None
 
+    @model_validator(mode="after")
+    def _validate_signal_semantics(self) -> "SignalMapping":
+        try:
+            self.promql_template.format(service="svc")
+        except (KeyError, ValueError, IndexError) as exc:
+            raise ValueError(
+                f"Signal '{self.logical_signal}' has invalid promql_template format '{self.promql_template}': {exc}"
+            ) from exc
+        if self.saturation_threshold is not None:
+            thr = float(self.saturation_threshold)
+            if math.isnan(thr) or math.isinf(thr) or thr < 0.0:
+                raise ValueError(
+                    f"Signal '{self.logical_signal}' saturation_threshold must be finite and non-negative, got {self.saturation_threshold}"
+                )
+            ratio_like = (
+                self.unit == "ratio"
+                or self.value_kind == "ratio"
+                or self.logical_signal in ("pool_active", "cpu_utilization", "memory_utilization", "error_rate")
+            )
+            if ratio_like and thr > 1.0:
+                raise ValueError(
+                    f"Ratio/utilization signal '{self.logical_signal}' saturation_threshold must be <= 1.0, got {thr}"
+                )
+        return self
+
 
 class ServiceSpec(BaseModel):
     """Service identity, dependencies, and default probes inside a profiled system."""
@@ -26,9 +112,18 @@ class ServiceSpec(BaseModel):
     role: Literal["ingress", "api", "worker", "datastore", "service"] = "service"
     depends_on: List[str] = Field(default_factory=list)
     metrics: List[str] = Field(default_factory=list)
-    replica_join_labels: List[str] = Field(
-        default_factory=lambda: ["pod", "instance", "container", "app", "service"]
+    replica_labels: List[str] = Field(
+        default_factory=lambda: ["pod", "instance", "container"]
     )
+    replica_join_labels: List[str] = Field(
+        default_factory=lambda: ["pod", "instance", "container"]
+    )
+
+    def resolved_replica_labels(self) -> Tuple[str, ...]:
+        """Returns declared true replica identity labels, excluding fleet-level service/app tags."""
+        raw = self.replica_labels or self.replica_join_labels
+        filtered = [k for k in raw if k not in ("service", "app")]
+        return tuple(filtered) if filtered else ("pod", "instance", "container")
 
 
 class TraceContract(BaseModel):
@@ -72,6 +167,21 @@ class SystemProfile(BaseModel):
     postmortems: List[Dict[str, Any]] = Field(default_factory=list)
     telemetry_auth: Dict[str, str] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _validate_topology_dag(self) -> "SystemProfile":
+        for svc_name, spec in self.services.items():
+            for dep in spec.depends_on:
+                if dep not in self.services:
+                    raise ValueError(
+                        f"Service '{svc_name}' depends on undefined service '{dep}' in profile '{self.profile_id}'."
+                    )
+        g = self.build_service_graph()
+        if not nx.is_directed_acyclic_graph(g):
+            raise ValueError(
+                f"Service topology for profile '{self.profile_id}' contains a dependency cycle; depends_on must form a DAG."
+            )
+        return self
+
     def resolve_service_names(self) -> Tuple[str, ...]:
         return tuple(self.services.keys())
 
@@ -103,6 +213,27 @@ class SystemProfile(BaseModel):
             for dep in spec.depends_on:
                 g.add_edge(svc_name, dep)
         return g
+
+    def validate_mappings(self) -> List[str]:
+        """Stage 1 preflight: validates declared signal semantics, replica keys, and trace contracts."""
+        warnings: List[str] = []
+        for logical, mapping in self.signals.items():
+            is_ratio = mapping.unit == "ratio" or mapping.value_kind in ("gauge", "ratio")
+            if is_ratio and mapping.unit == "ratio" and is_cumulative_counter_metric(mapping.promql_template, mapping.metric_name):
+                warnings.append(
+                    f"Signal '{logical}' ({mapping.metric_name}) declares unit='ratio' over un-rated cumulative query '{mapping.promql_template}'; "
+                    "add rate()/capacity normalization or it will be rejected as INVALID_MEASUREMENT."
+                )
+            if mapping.capacity_signal and mapping.capacity_signal not in self.signals and all(
+                s.metric_name != mapping.capacity_signal for s in self.signals.values()
+            ):
+                warnings.append(
+                    f"Signal '{logical}' references capacity_signal='{mapping.capacity_signal}' which is not declared in profile.signals."
+                )
+        for svc_name, spec in self.services.items():
+            if not spec.resolved_replica_labels():
+                warnings.append(f"Service '{svc_name}' has no replica identity labels configured.")
+        return warnings
 
     def preflight(self, available_signals: Optional[Set[str]] = None) -> Dict[str, RulePreflightResult]:
         """Evaluates which diagnostic rules can run given mapped and live/available signals."""

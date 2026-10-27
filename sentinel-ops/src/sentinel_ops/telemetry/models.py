@@ -10,10 +10,13 @@ AttemptStatus = Literal[
     "SUCCESS",
     "EMPTY",
     "UNSUPPORTED",
+    "INVALID_MEASUREMENT",
     "STALE_TELEMETRY",
     "TOOL_FAILURE",
     "BUDGET_EXCEEDED",
 ]
+
+CoverageStatus = Literal["COMPLETE", "PARTIAL", "EMPTY", "UNKNOWN"]
 
 JoinStatus = Literal[
     "single_series",
@@ -40,6 +43,10 @@ class ProbeAttempt(BaseModel):
     duration_ms: float = 0.0
     acquired_at: str = ""
     error_detail: Optional[str] = None
+    total_series_count: Optional[int] = None
+    retained_series_count: Optional[int] = None
+    truncated: bool = False
+    coverage_status: CoverageStatus = "UNKNOWN"
 
 
 class NormalizedMetricObservation(BaseModel):
@@ -49,11 +56,14 @@ class NormalizedMetricObservation(BaseModel):
 
     observation_id: str
     attempt_id: str
+    attempt_ids: Tuple[str, ...] = ()
+    sample_revision: str = ""
     backend_source: Literal["prometheus"] = "prometheus"
     service: str
     signal_name: str
     entity_labels: Dict[str, str] = Field(default_factory=dict)
     join_key: str = "unlabeled"
+    replica_key: str = ""
     unit: str = ""
     value_kind: Literal["gauge", "counter_delta", "ratio", "histogram_quantile"] = "gauge"
     value: Optional[float] = None
@@ -62,9 +72,13 @@ class NormalizedMetricObservation(BaseModel):
     denominator: Optional[float] = None
     counter_reset_detected: bool = False
     join_status: JoinStatus = "single_series"
+    truncated: bool = False
+    total_series_count: Optional[int] = None
+    retained_series_count: Optional[int] = None
+    coverage_status: CoverageStatus = "UNKNOWN"
     sample_timestamps: Tuple[float, ...] = ()
     requested_window: Tuple[str, str]
-    status: Literal["SUCCESS", "EMPTY", "UNSUPPORTED", "STALE_TELEMETRY", "TOOL_FAILURE"]
+    status: Literal["SUCCESS", "EMPTY", "UNSUPPORTED", "INVALID_MEASUREMENT", "STALE_TELEMETRY", "TOOL_FAILURE"]
     finding: str
     raw_payload: str = ""
 
@@ -76,6 +90,8 @@ class NormalizedTraceObservation(BaseModel):
 
     observation_id: str
     attempt_id: str
+    attempt_ids: Tuple[str, ...] = ()
+    sample_revision: str = ""
     backend_source: Literal["tempo"] = "tempo"
     target_service: str
     trace_id: str
@@ -86,7 +102,7 @@ class NormalizedTraceObservation(BaseModel):
     error_spans: List[Dict[str, Any]] = Field(default_factory=list)
     spans: List[Dict[str, Any]] = Field(default_factory=list)
     requested_window: Tuple[str, str]
-    status: Literal["SUCCESS", "EMPTY", "UNSUPPORTED", "STALE_TELEMETRY", "TOOL_FAILURE"]
+    status: Literal["SUCCESS", "EMPTY", "UNSUPPORTED", "INVALID_MEASUREMENT", "STALE_TELEMETRY", "TOOL_FAILURE"]
     finding: str
     raw_payload: str = ""
 

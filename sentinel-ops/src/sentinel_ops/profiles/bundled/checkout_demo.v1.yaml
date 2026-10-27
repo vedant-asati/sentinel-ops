@@ -1,0 +1,140 @@
+profile_id: checkout-demo
+version: "1.0.0"
+environment: local-sandbox
+
+services:
+  checkout-service:
+    name: checkout-service
+    role: ingress
+    depends_on:
+      - cart-service
+      - pricing-service
+      - payment-service
+    metrics:
+      - latency_p95
+      - error_rate
+  payment-service:
+    name: payment-service
+    role: service
+    depends_on:
+      - postgres-db
+    metrics:
+      - pool_active
+      - latency_p95
+      - error_rate
+      - pool_acquire_timeouts
+      - upstream_connect_timeouts
+    replica_labels: [pod, instance, container]
+  pricing-service:
+    name: pricing-service
+    role: service
+    metrics:
+      - latency_p95
+      - cpu_utilization
+      - pool_active
+      - pool_acquire_timeouts
+      - upstream_connect_timeouts
+    replica_labels: [pod, instance, container]
+  cart-service:
+    name: cart-service
+    role: service
+    metrics:
+      - memory_utilization
+      - container_restarts
+      - error_rate
+  postgres-db:
+    name: postgres-db
+    role: datastore
+
+signals:
+  error_rate:
+    logical_signal: error_rate
+    metric_name: error_rate
+    promql_template: 'payment_error_rate{{service="{service}"}}'
+    unit: ratio
+    value_kind: gauge
+  latency_p95:
+    logical_signal: latency_p95
+    metric_name: latency_p95
+    promql_template: 'histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{{service="{service}"}}[1m])))'
+    unit: seconds
+    value_kind: histogram_quantile
+  pool_active:
+    logical_signal: pool_active
+    metric_name: db_pool_active
+    promql_template: 'payment_db_pool_active{{service="{service}"}}'
+    unit: ratio
+    value_kind: ratio
+    capacity_signal: db_pool_size
+    saturation_threshold: 0.95
+  pool_capacity:
+    logical_signal: pool_capacity
+    metric_name: db_pool_size
+    promql_template: 'payment_db_pool_size{{service="{service}"}}'
+    unit: connections
+    value_kind: gauge
+  pool_acquire_timeouts:
+    logical_signal: pool_acquire_timeouts
+    metric_name: db_pool_acquire_timeouts_total
+    promql_template: 'payment_db_pool_acquire_timeouts_total{{service="{service}"}}'
+    unit: timeouts
+    value_kind: counter_delta
+  upstream_connect_timeouts:
+    logical_signal: upstream_connect_timeouts
+    metric_name: upstream_connect_timeouts_total
+    promql_template: 'upstream_connect_timeouts_total{{service="{service}"}}'
+    unit: timeouts
+    value_kind: counter_delta
+  cpu_utilization:
+    logical_signal: cpu_utilization
+    metric_name: cpu_saturation
+    promql_template: 'container_cpu_usage_seconds_total{{container="{service}"}}'
+    unit: ratio
+    value_kind: gauge
+    saturation_threshold: 0.85
+  memory_utilization:
+    logical_signal: memory_utilization
+    metric_name: memory_usage
+    promql_template: 'container_memory_usage_ratio{{container="{service}"}}'
+    unit: ratio
+    value_kind: gauge
+    saturation_threshold: 0.90
+  container_restarts:
+    logical_signal: container_restarts
+    metric_name: container_restarts
+    promql_template: 'container_restart_count{{container="{service}"}}'
+    unit: restarts
+    value_kind: gauge
+
+trace_contract:
+  operation_aliases:
+    pool_acquisition_timeout:
+      - db.connection.acquire
+    upstream_connect_timeout:
+      - rpc.connect
+  timeout_error_markers:
+    - TimeoutError
+    - DEADLINE_EXCEEDED
+
+enabled_rules:
+  - pool_acquisition_timeout
+  - upstream_connect_timeout
+  - cpu_contention
+  - memory_leak_oomkill
+
+check_templates:
+  pool_acquisition_timeout:
+    - "Inspect connection pool sizing and max connection wait timeout settings on {service}"
+    - "Check active database locks and wait queues for {service}"
+  upstream_connect_timeout:
+    - "Verify TCP routing, firewall, and upstream endpoint health on {service}"
+  cpu_contention:
+    - "Collect CPU profile and check CPU throttling (CFS quotas) on {service}"
+  memory_leak_oomkill:
+    - "Inspect OOM killer logs and heap profiles for {service}"
+
+runbook_hints:
+  pool_acquisition_timeout: "helm upgrade --set db.pool.max_connections=100 {service} ./charts/{service}"
+  upstream_connect_timeout: "kubectl rollout restart deployment/{service}"
+  cpu_contention: "kubectl scale deployment/{service} --replicas=4"
+  memory_leak_oomkill: "kubectl rollout restart deployment/{service}"

@@ -154,13 +154,11 @@ def inject_fault(fault_type: str):
         FAULT_STATE["container_restarts"] = 4
         FAULT_STATE["active_fault"] = "memory_leak"
     elif fault_type == "recover":
+        # Recover gauges and semaphore capacity while keeping Prometheus *_total counters strictly monotonic
         FAULT_STATE["db_pool_active"] = 1.0
         FAULT_STATE["db_pool_size"] = 100.0
-        FAULT_STATE["db_pool_acquire_timeouts_total"] = 0
-        FAULT_STATE["upstream_connect_timeouts_total"] = 0
         FAULT_STATE["cpu_saturation"] = 0.15
         FAULT_STATE["memory_usage"] = 0.35
-        FAULT_STATE["container_restarts"] = 0
         FAULT_STATE["latency_p95"] = 0.025
         FAULT_STATE["error_rate"] = 0.01
         FAULT_STATE["active_fault"] = None

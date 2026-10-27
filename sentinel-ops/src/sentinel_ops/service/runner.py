@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import hashlib
+import json
 import logging
 import time
 from typing import Any, AsyncIterator, Dict, Optional
 import uuid
 
 from sentinel_ops.agents.graph import compile_investigation_graph
+from sentinel_ops.agents.specialists import set_backend_semaphores
 from sentinel_ops.agents.state import EvidenceItem
 from sentinel_ops.agents.synthesizer import format_incident_brief
 from sentinel_ops.core.config import settings
 from sentinel_ops.memory.graph_rag import TopologyGraphRAG
 from sentinel_ops.profiles.registry import get_profile
-from sentinel_ops.storage.repository import MemoryRunRepository, RunRecord, RunRepository
+from sentinel_ops.storage.repository import IdempotencyConflictError, MemoryRunRepository, RunRecord, RunRepository
 from sentinel_ops.telemetry.reader import LiveTelemetryReader, SnapshotReplayReader
 
 logger = logging.getLogger(__name__)
@@ -70,13 +73,22 @@ class InvestigationService:
         max_concurrent_backend_calls: int = 8,
     ):
         self.repo: RunRepository = repository or MemoryRunRepository(maxsize=500)
+        self.repo.recover_interrupted_runs(completed_at=_utc_now_iso())
         self.backend_semaphores: Dict[str, asyncio.Semaphore] = {
             "prometheus": asyncio.Semaphore(max_concurrent_backend_calls),
             "tempo": asyncio.Semaphore(max_concurrent_backend_calls),
         }
+        set_backend_semaphores(max_concurrent=max_concurrent_backend_calls)
         self._tasks: Dict[str, asyncio.Task[Any]] = {}
         self._notifiers: Dict[str, asyncio.Condition] = {}
+        self._subscribers: Dict[str, int] = {}
         self._readers: list[LiveTelemetryReader] = []
+
+    def _cleanup_run_handles(self, run_id: str) -> None:
+        self._tasks.pop(run_id, None)
+        if self._subscribers.get(run_id, 0) <= 0:
+            self._notifiers.pop(run_id, None)
+            self._subscribers.pop(run_id, None)
 
     def _get_notifier(self, run_id: str) -> asyncio.Condition:
         cond = self._notifiers.get(run_id)
@@ -166,6 +178,7 @@ class InvestigationService:
         self,
         *,
         case_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
         incident_id: str,
         alert_text: str,
         incident_timestamp: str,
@@ -186,6 +199,26 @@ class InvestigationService:
             )
 
         profile = get_profile(profile_id)
+        fp_payload = {
+            "case_id": case_id,
+            "target_service": target_service,
+            "profile_id": profile.profile_id,
+            "environment": environment,
+            "trace_id": trace_id,
+            "alert_text": alert_text,
+            "incident_timestamp": incident_timestamp,
+            "window_before_minutes": window_before_minutes,
+            "window_after_minutes": window_after_minutes,
+            "use_llm": use_llm,
+        }
+        req_fp = hashlib.sha256(json.dumps(fp_payload, sort_keys=True).encode("utf-8")).hexdigest()
+        if idempotency_key:
+            existing = self.repo.get_by_idempotency_key(environment, idempotency_key)
+            if existing is not None:
+                if existing.request_fingerprint != req_fp:
+                    raise IdempotencyConflictError("Idempotency-Key reused with different request payload.")
+                return existing.run_id
+
         run_id = uuid.uuid4().hex[:12]
         eff_redact = settings.SENTINEL_REDACT_RAW_PAYLOADS if redact_raw is None else redact_raw
 
@@ -193,6 +226,8 @@ class InvestigationService:
             RunRecord(
                 run_id=run_id,
                 case_id=case_id,
+                idempotency_key=idempotency_key,
+                request_fingerprint=req_fp,
                 environment=environment,
                 profile_id=profile.profile_id,
                 profile_version=profile.version,
@@ -337,26 +372,47 @@ class InvestigationService:
                 raise
             except Exception as err:
                 logger.error("Run %s execution failed: %s", run_id, err)
-                err_state = _serialize_state({
-                    **initial_state,
-                    "terminal_status": "OPERATIONAL_FAILURE",
-                    "terminal_reason": str(err),
-                    "root_cause_summary": f"Execution error: {err}",
-                }, redact_raw=eff_redact)
-                brief_md = format_incident_brief(err_state, fmt="markdown")
-                brief_js = format_incident_brief(err_state, fmt="json")
-                if self.repo.commit_terminal(
-                    run_id,
-                    status="FAILED",
-                    final_state=err_state,
-                    brief_markdown=brief_md,
-                    brief_json=brief_js,
-                    completed_at=_utc_now_iso(),
-                ):
-                    await self._emit(run_id, {"type": "error", "error": str(err)})
+                try:
+                    err_state = _serialize_state({
+                        **initial_state,
+                        "terminal_status": "OPERATIONAL_FAILURE",
+                        "terminal_reason": str(err),
+                        "root_cause_summary": f"Execution error: {err}",
+                    }, redact_raw=eff_redact)
+                    brief_md = format_incident_brief(err_state, fmt="markdown")
+                    brief_js = format_incident_brief(err_state, fmt="json")
+                    if self.repo.commit_terminal(
+                        run_id,
+                        status="FAILED",
+                        final_state=err_state,
+                        brief_markdown=brief_md,
+                        brief_json=brief_js,
+                        completed_at=_utc_now_iso(),
+                    ):
+                        await self._emit(run_id, {"type": "error", "error": str(err)})
+                except Exception as commit_err:
+                    logger.critical("Fallback error commit failed for run %s: %s", run_id, commit_err)
+                    try:
+                        self.repo.commit_terminal(
+                            run_id,
+                            status="FAILED",
+                            final_state={"terminal_status": "OPERATIONAL_FAILURE", "terminal_reason": str(err)},
+                            brief_markdown=f"# Error\n{err}",
+                            brief_json=json.dumps({"terminal_status": "OPERATIONAL_FAILURE", "error": str(err)}),
+                            completed_at=_utc_now_iso(),
+                        )
+                    except Exception:
+                        pass
+                    cond = self._notifiers.get(run_id)
+                    if cond is not None:
+                        async with cond:
+                            cond.notify_all()
+            finally:
+                self._cleanup_run_handles(run_id)
 
         task = asyncio.create_task(_runner(), name=f"sentinel_run_{run_id}")
         self._tasks[run_id] = task
+        task.add_done_callback(lambda _t, rid=run_id: self._cleanup_run_handles(rid))
         return run_id
 
     async def cancel_run(self, run_id: str) -> Optional[RunRecord]:
@@ -399,28 +455,36 @@ class InvestigationService:
         """Yields sequenced events after last_event_id and tails live transitions until terminal commit."""
         cursor = max(0, int(last_event_id))
         cond = self._get_notifier(run_id)
-        while True:
-            pending = self.repo.list_events_after(run_id, last_seq=cursor)
-            for ev in pending:
-                cursor = ev["seq"]
-                yield ev
-            rec = self.repo.get_run(run_id)
-            if rec is None:
-                return
-            if rec.status in ("COMPLETED", "CANCELED", "FAILED"):
-                # Flush any final event committed right before reading status
-                tail = self.repo.list_events_after(run_id, last_seq=cursor)
-                for ev in tail:
+        self._subscribers[run_id] = self._subscribers.get(run_id, 0) + 1
+        try:
+            while True:
+                pending = self.repo.list_events_after(run_id, last_seq=cursor)
+                for ev in pending:
+                    cursor = ev["seq"]
                     yield ev
-                return
-            async with cond:
-                # Re-check inside lock before waiting
-                if self.repo.list_events_after(run_id, last_seq=cursor):
-                    continue
-                rec_now = self.repo.get_run(run_id)
-                if rec_now is None or rec_now.status in ("COMPLETED", "CANCELED", "FAILED"):
-                    continue
-                try:
-                    await asyncio.wait_for(cond.wait(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    pass
+                rec = self.repo.get_run(run_id)
+                if rec is None:
+                    return
+                if rec.status in ("COMPLETED", "CANCELED", "FAILED"):
+                    tail = self.repo.list_events_after(run_id, last_seq=cursor)
+                    for ev in tail:
+                        yield ev
+                    return
+                async with cond:
+                    if self.repo.list_events_after(run_id, last_seq=cursor):
+                        continue
+                    rec_now = self.repo.get_run(run_id)
+                    if rec_now is None or rec_now.status in ("COMPLETED", "CANCELED", "FAILED"):
+                        continue
+                    try:
+                        await asyncio.wait_for(cond.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        pass
+        finally:
+            rem = max(0, self._subscribers.get(run_id, 1) - 1)
+            if rem == 0:
+                self._subscribers.pop(run_id, None)
+                if run_id not in self._tasks:
+                    self._notifiers.pop(run_id, None)
+            else:
+                self._subscribers[run_id] = rem

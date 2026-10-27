@@ -13,48 +13,31 @@ async def test_graph_compilation():
 async def test_case_01_payment_db_pool_investigation():
     graph = compile_investigation_graph()
 
-    # Pre-seed simulated payment db pool saturated evidence
     initial_state = {
         "incident_id": "test_case_01",
         "alert_text": "checkout-service p95 latency spike",
         "incident_timestamp": "2026-11-24T14:32:00Z",
         "target_service": "checkout-service",
-        "simulated_telemetry": {"prometheus": {}, "tempo": {}},
-        "evidence": [
-            EvidenceItem(
-                id="EV-prom-paym-db_p",
-                backend_source="prometheus",
-                query_string="payment_db_pool_active",
-                query_params={"service": "payment-service", "metric_type": "db_pool_active"},
-                observation_window=("2026-11-24T14:30:00Z", "2026-11-24T14:35:00Z"),
-                sample_or_span_ref="db_pool_active",
-                finding="payment_db_pool_active saturated at 2.0 / 2.0 (100% capacity exhausted)",
-                raw_payload="[[1795530720, '2.0']]",
-                status="SUCCESS",
-            ),
-            EvidenceItem(
-                id="EV-prom-paym-db_acq",
-                backend_source="prometheus",
-                query_string="payment_db_pool_acquire_timeouts_total",
-                query_params={"service": "payment-service", "metric_type": "db_pool_acquire_timeouts_total"},
-                observation_window=("2026-11-24T14:30:00Z", "2026-11-24T14:35:00Z"),
-                sample_or_span_ref="db_pool_acquire_timeouts_total",
-                finding="payment-service db_pool_acquire_timeouts_total spiked with delta +9 timeouts",
-                raw_payload="[[1795530720, '2'], [1795530750, '11']]",
-                status="SUCCESS",
-            ),
-            EvidenceItem(
-                id="EV-prom-pric-late",
-                backend_source="prometheus",
-                query_string="pricing_latency_p95",
-                query_params={"service": "pricing-service"},
-                observation_window=("2026-11-24T14:30:00Z", "2026-11-24T14:35:00Z"),
-                sample_or_span_ref="latency_p95",
-                finding="pricing-service latency_p95 normal at 0.024s (healthy)",
-                raw_payload="[[1732458720, '0.024']]",
-                status="SUCCESS",
-            ),
-        ],
+        "simulated_telemetry": {
+            "prometheus": {
+                "payment-service": {
+                    "db_pool_active": {"status": "SUCCESS", "values": [[1795530720, "2.0"], [1795530735, "2.0"]]},
+                    "db_pool_size": {"status": "SUCCESS", "values": [[1795530720, "2.0"], [1795530735, "2.0"]]},
+                    "db_pool_acquire_timeouts_total": {"status": "SUCCESS", "values": [[1795530720, "2"], [1795530750, "11"]]},
+                },
+                "pricing-service": {
+                    "latency_p95": {"status": "SUCCESS", "values": [[1795530720, "0.025"], [1795530735, "0.024"]]},
+                },
+            },
+            "tempo": {
+                "trace_chk_01": {
+                    "status": "SUCCESS",
+                    "timestamp": 1795530735,
+                    "bottleneck_service": "payment-service",
+                    "bottleneck_duration_ms": 4120.0,
+                }
+            },
+        },
     }
 
     config = {"configurable": {"thread_id": "thread_case_01"}}
@@ -69,7 +52,8 @@ async def test_case_01_payment_db_pool_investigation():
 
 
 @pytest.mark.asyncio
-async def test_case_02_pricing_latency_investigation():
+async def test_case_02_pricing_latency_localizes_and_abstains_in_pilot_mode():
+    """In default pilot mode (pool-timeout family only), CPU latency localizes pricing-service and safely abstains."""
     graph = compile_investigation_graph()
 
     initial_state = {
@@ -77,51 +61,34 @@ async def test_case_02_pricing_latency_investigation():
         "alert_text": "checkout-service p95 latency spike",
         "incident_timestamp": "2026-11-24T15:10:00Z",
         "target_service": "checkout-service",
-        "simulated_telemetry": {"prometheus": {}, "tempo": {}},
-        "evidence": [
-            EvidenceItem(
-                id="EV-prom-paym-db_p",
-                backend_source="prometheus",
-                query_string="payment_db_pool_active",
-                query_params={"service": "payment-service"},
-                observation_window=("2026-11-24T15:10:00Z", "2026-11-24T15:15:00Z"),
-                sample_or_span_ref="db_pool_active",
-                finding="payment_db_pool_active normal at 1.0 (pool size = 100)",
-                raw_payload="[[1732461000, '1.0']]",
-                status="SUCCESS",
-            ),
-            EvidenceItem(
-                id="EV-tempo-chec",
-                backend_source="tempo",
-                query_string="trace_chk_02",
-                query_params={"target_service": "checkout-service"},
-                observation_window=("2026-11-24T15:10:00Z", "2026-11-24T15:15:00Z"),
-                sample_or_span_ref="span_waterfall",
-                finding="Distributed trace trace_chk_02 waterfall: bottleneck in pricing-service (3820.0ms)",
-                raw_payload="{'bottleneck_service': 'pricing-service'}",
-                status="SUCCESS",
-            ),
-            EvidenceItem(
-                id="EV-prom-pric-cpu_",
-                backend_source="prometheus",
-                query_string="pricing_cpu",
-                query_params={"service": "pricing-service", "metric_type": "cpu_saturation"},
-                observation_window=("2026-11-24T15:10:00Z", "2026-11-24T15:15:00Z"),
-                sample_or_span_ref="cpu_saturation",
-                finding="pricing-service cpu_saturation critically saturated at 98%",
-                raw_payload="[[1795533000, '0.98']]",
-                status="SUCCESS",
-            ),
-        ],
+        "simulated_telemetry": {
+            "prometheus": {
+                "payment-service": {
+                    "db_pool_active": {"status": "SUCCESS", "values": [[1795533000, "1.0"], [1795533015, "1.0"]]},
+                    "db_pool_size": {"status": "SUCCESS", "values": [[1795533000, "100.0"], [1795533015, "100.0"]]},
+                },
+                "pricing-service": {
+                    "latency_p95": {"status": "SUCCESS", "values": [[1795533000, "3.85"], [1795533015, "3.92"]]},
+                    "cpu_saturation": {"status": "SUCCESS", "values": [[1795533000, "0.95"], [1795533015, "0.98"]]},
+                },
+            },
+            "tempo": {
+                "trace_chk_02": {
+                    "status": "SUCCESS",
+                    "timestamp": 1795533015,
+                    "bottleneck_service": "pricing-service",
+                    "bottleneck_duration_ms": 3820.0,
+                }
+            },
+        },
     }
 
     config = {"configurable": {"thread_id": "thread_case_02"}}
     final_state = await graph.ainvoke(initial_state, config=config)
 
-    assert final_state["terminal_status"] == "SUPPORTED_DIAGNOSIS"
-    assert "pricing-service" in final_state["root_cause_summary"]
-    assert final_state["adversarial_verdict"].all_claims_supported is True
-    assert any(c.claim_type == "competing_hypothesis_falsified" for c in final_state["structured_claims"])
+    assert final_state["terminal_status"] == "INSUFFICIENT_EVIDENCE"
+    assert final_state["localized_dependency"]["bottleneck_service"] == "pricing-service"
+    assert any("pricing-service" in chk for chk in final_state["next_discriminating_checks"])
 
 
 @pytest.mark.asyncio

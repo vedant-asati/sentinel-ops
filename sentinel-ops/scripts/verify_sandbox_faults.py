@@ -145,26 +145,28 @@ def main() -> int:
                 expected_svc="payment-service",
             )
 
-            # Positive 3: pricing-service cpu_saturation
+            # Positive 3 (Pilot Scope): pricing-service cpu_saturation localizes pricing-service and safely abstains
             recover_all(client)
             time.sleep(6.0)
             inject_fault(client, "pricing-service", "cpu_saturation")
             tid_cpu = generate_checkout_traffic(client, count=6)
             time.sleep(12.0)
-            check_case(
-                agent,
-                "Positive 3 (Pricing CPU Saturation)",
-                {
-                    "id": "live_pos_cpu_saturation",
-                    "alert_text": f"High p95 latency on checkout trace {tid_cpu}",
-                    "incident_timestamp": now_iso(),
-                    "target_service": "checkout-service",
-                    "trace_id": tid_cpu,
-                    "mock_telemetry": None,
-                },
-                expected_status="SUPPORTED_DIAGNOSIS",
-                expected_svc="pricing-service",
+            res_cpu = agent.diagnose({
+                "id": "live_pos_cpu_saturation",
+                "alert_text": f"High p95 latency on checkout trace {tid_cpu}",
+                "incident_timestamp": now_iso(),
+                "target_service": "checkout-service",
+                "trace_id": tid_cpu,
+                "mock_telemetry": None,
+            })
+            print(
+                f"[Control 3 (Pricing Slow Span / Pilot Localization)] status={res_cpu.get('terminal_status')} "
+                f"localized={((res_cpu.get('localized_dependency') or {}).get('bottleneck_service'))}"
             )
+            if res_cpu.get("terminal_status") != "INSUFFICIENT_EVIDENCE":
+                raise AssertionError(f"Expected safe pilot abstention for slow CPU span, got {res_cpu.get('terminal_status')}")
+            if (res_cpu.get("localized_dependency") or {}).get("bottleneck_service") != "pricing-service":
+                raise AssertionError(f"Expected localized pricing-service, got {res_cpu.get('localized_dependency')}")
 
             print("\nALL LIVE SANDBOX POSITIVE & NEGATIVE CONTROLS PASSED!")
             return 0

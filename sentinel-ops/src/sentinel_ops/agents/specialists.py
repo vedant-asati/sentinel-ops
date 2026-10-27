@@ -1,8 +1,10 @@
 """Specialist worker nodes routing live and replay telemetry through the unified TelemetryReader."""
 
+import asyncio
 import hashlib
 import logging
 from typing import Any, Dict, List, Optional, Tuple
+import weakref
 
 from sentinel_ops.agents.state import EvidenceItem
 from sentinel_ops.mcp.prometheus_adapter import PrometheusAdapter
@@ -15,20 +17,65 @@ logger = logging.getLogger(__name__)
 
 _PROM_ADAPTER: Optional[PrometheusAdapter] = None
 _TEMPO_ADAPTER: Optional[TempoAdapter] = None
+_PROM_ADAPTER_BY_LOOP: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, PrometheusAdapter]" = weakref.WeakKeyDictionary()
+_TEMPO_ADAPTER_BY_LOOP: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, TempoAdapter]" = weakref.WeakKeyDictionary()
+_MAX_CONCURRENT_BACKEND_CALLS: int = 8
+_LOOP_SEMAPHORES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, asyncio.Semaphore]]" = weakref.WeakKeyDictionary()
+
+
+def set_backend_semaphores(sems: Optional[Dict[str, Any]] = None, max_concurrent: int = 8) -> None:
+    """Configures loop-local per-backend concurrency semaphores for InvestigationService."""
+    global _MAX_CONCURRENT_BACKEND_CALLS
+    _MAX_CONCURRENT_BACKEND_CALLS = max(1, int(max_concurrent))
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if sems is not None:
+        _LOOP_SEMAPHORES[loop] = sems
+
+
+def get_backend_semaphores() -> Dict[str, asyncio.Semaphore]:
+    """Returns per-backend semaphores bound strictly to the current running event loop."""
+    loop = asyncio.get_running_loop()
+    sems = _LOOP_SEMAPHORES.get(loop)
+    if sems is None:
+        sems = {
+            "prometheus": asyncio.Semaphore(_MAX_CONCURRENT_BACKEND_CALLS),
+            "tempo": asyncio.Semaphore(_MAX_CONCURRENT_BACKEND_CALLS),
+        }
+        _LOOP_SEMAPHORES[loop] = sems
+    return sems
 
 
 def get_prometheus_adapter() -> PrometheusAdapter:
     global _PROM_ADAPTER
-    if _PROM_ADAPTER is None:
-        _PROM_ADAPTER = PrometheusAdapter()
-    return _PROM_ADAPTER
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        if _PROM_ADAPTER is None:
+            _PROM_ADAPTER = PrometheusAdapter()
+        return _PROM_ADAPTER
+    adapter = _PROM_ADAPTER_BY_LOOP.get(loop)
+    if adapter is None:
+        adapter = PrometheusAdapter()
+        _PROM_ADAPTER_BY_LOOP[loop] = adapter
+    return adapter
 
 
 def get_tempo_adapter() -> TempoAdapter:
     global _TEMPO_ADAPTER
-    if _TEMPO_ADAPTER is None:
-        _TEMPO_ADAPTER = TempoAdapter()
-    return _TEMPO_ADAPTER
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        if _TEMPO_ADAPTER is None:
+            _TEMPO_ADAPTER = TempoAdapter()
+        return _TEMPO_ADAPTER
+    adapter = _TEMPO_ADAPTER_BY_LOOP.get(loop)
+    if adapter is None:
+        adapter = TempoAdapter()
+        _TEMPO_ADAPTER_BY_LOOP[loop] = adapter
+    return adapter
 
 
 def _metric_tag(metric_type: str) -> str:
@@ -89,7 +136,10 @@ async def metrics_specialist_node(payload: Dict[str, Any]) -> Dict[str, Any]:
         if sim_telem is not None:
             reader = SnapshotReplayReader(sim_telem)
         else:
-            reader = LiveTelemetryReader(prom_adapter=get_prometheus_adapter())
+            reader = LiveTelemetryReader(
+                prom_adapter=get_prometheus_adapter(),
+                backend_semaphores=payload.get("backend_semaphores") or get_backend_semaphores(),
+            )
 
     profile_id = payload.get("profile_id", "checkout-demo")
     read_kwargs: Dict[str, Any] = {}
@@ -102,11 +152,11 @@ async def metrics_specialist_node(payload: Dict[str, Any]) -> Dict[str, Any]:
             if sig_map.capacity_signal:
                 read_kwargs["capacity_signal"] = sig_map.capacity_signal
         svc_spec = profile.services.get(service)
-        if svc_spec and svc_spec.replica_join_labels:
-            read_kwargs["join_labels"] = tuple(svc_spec.replica_join_labels)
+        if svc_spec:
+            read_kwargs["join_labels"] = svc_spec.resolved_replica_labels()
+        read_kwargs["promql_templates"] = profile.to_promql_templates()
         if profile_id != "checkout-demo":
             read_kwargs["allowed_services"] = profile.resolve_service_names()
-            read_kwargs["promql_templates"] = profile.to_promql_templates()
     except Exception:
         pass
 
@@ -127,13 +177,19 @@ async def metrics_specialist_node(payload: Dict[str, Any]) -> Dict[str, Any]:
     for idx, obs in enumerate(obs_list):
         ev_id = base_ev_id
         if multi:
-            suffix = hashlib.sha1(obs.join_key.encode("utf-8")).hexdigest()[:4]
+            suffix = hashlib.sha1(f"{obs.join_key}:{obs.sample_revision}".encode("utf-8")).hexdigest()[:4]
             ev_id = f"{base_ev_id}-{suffix}-{idx}"
         q_params: Dict[str, Any] = {
             "service": service,
             "metric_type": metric_type,
             "observation_id": obs.observation_id,
+            "coverage_status": obs.coverage_status,
+            "truncated": obs.truncated,
         }
+        if obs.total_series_count is not None:
+            q_params["total_series_count"] = obs.total_series_count
+        if obs.replica_key:
+            q_params["replica_key"] = obs.replica_key
         if obs.join_key != "unlabeled":
             q_params["join_key"] = obs.join_key
         if obs.entity_labels:
@@ -172,7 +228,10 @@ async def trace_specialist_node(payload: Dict[str, Any]) -> Dict[str, Any]:
         if sim_telem is not None:
             reader = SnapshotReplayReader(sim_telem)
         else:
-            reader = LiveTelemetryReader(tempo_adapter=get_tempo_adapter())
+            reader = LiveTelemetryReader(
+                tempo_adapter=get_tempo_adapter(),
+                backend_semaphores=payload.get("backend_semaphores") or get_backend_semaphores(),
+            )
 
     obs, attempts = await reader.read_trace(
         target_service=target_service,
@@ -197,6 +256,10 @@ async def trace_specialist_node(payload: Dict[str, Any]) -> Dict[str, Any]:
     span_ref = "span_waterfall"
     if obs.error_spans:
         span_ref = str(obs.error_spans[0].get("span_id") or "span_waterfall")
+    elif obs.spans and obs.bottleneck_service:
+        bspan = next((s for s in obs.spans if s.get("service") == obs.bottleneck_service), None)
+        if bspan and bspan.get("span_id"):
+            span_ref = str(bspan["span_id"])
 
     item = EvidenceItem(
         id=evidence_id,

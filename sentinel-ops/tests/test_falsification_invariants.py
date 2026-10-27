@@ -11,20 +11,39 @@ from sentinel_ops.mcp.prometheus_adapter import PrometheusAdapter
 def test_run_isolation_instance_reuse():
     """P0 Probe: Ensure reusing an agent instance across runs never bleeds previous state."""
     cases = {c["id"]: c for c in load_fixtures()}
-    changed = dict(
+    tid = "e" * 32
+    pricing_timeout_case = dict(
         cases["case_01"],
-        incident_timestamp=cases["case_02"]["incident_timestamp"],
-        mock_telemetry=cases["case_02"]["mock_telemetry"],
+        id="case_pricing_timeout",
+        alert_text=f"Checkout timeout on trace {tid}",
+        trace_id=tid,
+        mock_telemetry={
+            "prometheus": {
+                "pricing-service": {
+                    "upstream_connect_timeouts_total": {"status": "SUCCESS", "values": [[1795530720, "1"], [1795530735, "7"]]},
+                }
+            },
+            "tempo": {
+                tid: {
+                    "status": "SUCCESS",
+                    "timestamp": 1795530735,
+                    "spans": [
+                        {"span_id": "r", "parent_span_id": "", "service": "checkout-service", "name": "checkout", "duration_ms": 2100.0},
+                        {"span_id": "p", "parent_span_id": "r", "service": "pricing-service", "name": "rpc.connect", "duration_ms": 2050.0, "error": "TimeoutError"},
+                    ],
+                }
+            },
+        },
     )
-    
+
     used = SentinelOpsLangGraphAgent()
     first_res = used.diagnose(cases["case_01"])
     assert first_res["diagnosed_root_cause"] == "payment-service"
 
-    fresh_res = SentinelOpsLangGraphAgent().diagnose(changed)
-    second_res = used.diagnose(changed)
-    
-    # Must diagnose pricing-service on both fresh and reused instances
+    fresh_res = SentinelOpsLangGraphAgent().diagnose(pricing_timeout_case)
+    second_res = used.diagnose(pricing_timeout_case)
+
+    # Must diagnose pricing-service on both fresh and reused instances without bleeding payment-service state
     assert fresh_res["diagnosed_root_cause"] == "pricing-service"
     assert second_res["diagnosed_root_cause"] == "pricing-service"
 

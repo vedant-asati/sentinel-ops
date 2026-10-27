@@ -21,13 +21,14 @@ class EvidenceItem(BaseModel):
     sample_or_span_ref: str = Field(description="Target metric series key or span ID")
     finding: str = Field(description="Factual summary of observed telemetry")
     raw_payload: str = Field(description="Sanitized and defanged raw telemetry snippet")
-    status: Literal["SUCCESS", "EMPTY", "TOOL_FAILURE"] = Field(
-        description="Distinguishes valid proof-of-absence (EMPTY) from execution errors (TOOL_FAILURE)"
+    status: Literal["SUCCESS", "EMPTY", "INVALID_MEASUREMENT", "TOOL_FAILURE"] = Field(
+        description="Distinguishes valid proof-of-absence (EMPTY), bad unit/counter mappings (INVALID_MEASUREMENT), and execution errors (TOOL_FAILURE)"
     )
 
 
 STATUS_PRIORITY = {
-    "SUCCESS": 3,
+    "SUCCESS": 4,
+    "INVALID_MEASUREMENT": 3,
     "TOOL_FAILURE": 2,
     "EMPTY": 1,
 }
@@ -59,7 +60,8 @@ def merge_evidence_items(
 
 
 _OBS_STATUS_RANK = {
-    "SUCCESS": 5,
+    "SUCCESS": 6,
+    "INVALID_MEASUREMENT": 5,
     "STALE_TELEMETRY": 4,
     "UNSUPPORTED": 3,
     "TOOL_FAILURE": 2,
@@ -80,7 +82,9 @@ def merge_probe_attempts(
 def merge_observations(
     existing: List[Any], incoming: List[Any]
 ) -> List[Any]:
-    """Deterministic reducer for typed observations keyed by identity, never selecting truth via message length."""
+    """Deterministic reducer keyed by immutable content-revision ID, linking all observing attempts
+    while preserving conflicting revisions side-by-side.
+    """
     by_id: Dict[str, Any] = {}
     for obs in list(existing) + list(incoming):
         oid = getattr(obs, "observation_id", None)
@@ -90,20 +94,32 @@ def merge_observations(
             by_id[oid] = obs
         else:
             prev = by_id[oid]
+            merged_attempts = tuple(sorted(
+                set(getattr(prev, "attempt_ids", ()) or ((prev.attempt_id,) if getattr(prev, "attempt_id", None) else ()))
+                | set(getattr(obs, "attempt_ids", ()) or ((obs.attempt_id,) if getattr(obs, "attempt_id", None) else ()))
+            ))
             new_key = (_OBS_STATUS_RANK.get(obs.status, 0), obs.attempt_id)
             old_key = (_OBS_STATUS_RANK.get(prev.status, 0), prev.attempt_id)
-            if new_key > old_key:
-                by_id[oid] = obs
+            chosen = obs if new_key > old_key else prev
+            if hasattr(chosen, "model_copy"):
+                by_id[oid] = chosen.model_copy(update={"attempt_ids": merged_attempts})
+            else:
+                by_id[oid] = chosen
     return sorted(by_id.values(), key=lambda o: o.observation_id)
 
 
+ClaimScope = Literal["affected_request", "replica_correlated", "service_fleet"]
+
+
 class AtomicClaim(BaseModel):
-    """Atomic claim with explicit evidence citation mapping."""
+    """Atomic claim with explicit evidence citation mapping, subject, and scope."""
     model_config = ConfigDict(frozen=True)
 
     claim_id: str = Field(description="e.g., CL-001")
     statement: str = Field(description="Single factual assertion")
     claim_type: Literal["symptom", "root_cause", "mechanism", "competing_hypothesis_falsified"]
+    claim_subject: Optional[str] = Field(default=None, description="Exact blamed entity/replica/request subject")
+    claim_scope: Optional[ClaimScope] = Field(default=None, description="Evidence-supported claim scope")
     cited_evidence_ids: List[str] = Field(
         description="List of EV-xxx identifiers directly proving this statement"
     )

@@ -18,8 +18,10 @@ class Settings(BaseSettings):
 
     # Persistence & operational controls
     RUN_STORE_PATH: str = ""
+    DEFAULT_PROFILE_ID: str = "checkout-demo"
     SENTINEL_ENV_SCOPE: str = ""
     SENTINEL_REDACT_RAW_PAYLOADS: bool = False
+    EXPERIMENTAL_RULES_ENABLED: bool = False
     
     # Deadlines and timeouts (seconds)
     RUN_DEADLINE_SECONDS: float = 30.0

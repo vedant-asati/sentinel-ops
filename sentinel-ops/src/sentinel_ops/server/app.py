@@ -23,6 +23,7 @@ from sentinel_ops.dpo.trajectory_logger import DPOTrajectoryLogger
 from sentinel_ops.service.runner import InvestigationService
 from sentinel_ops.storage.repository import (
     ApprovalRecord,
+    IdempotencyConflictError,
     MemoryRunRepository,
     SQLiteRunRepository,
 )
@@ -144,6 +145,7 @@ def _resolve_case_intake(
 
 class RunCreateRequest(BaseModel):
     case_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
     target_service: str = "checkout-service"
     alert_text: Optional[str] = None
     incident_timestamp: Optional[str] = None
@@ -155,14 +157,24 @@ class RunCreateRequest(BaseModel):
     use_llm: bool = False
 
 
+def _enforce_env_scope(rec_env: str, x_sentinel_env: Optional[str]) -> None:
+    if settings.SENTINEL_ENV_SCOPE:
+        if rec_env != settings.SENTINEL_ENV_SCOPE or (
+            x_sentinel_env is not None and x_sentinel_env != settings.SENTINEL_ENV_SCOPE
+        ):
+            raise HTTPException(status_code=403, detail="Forbidden for this environment scope")
+
+
 @app.post("/api/runs", status_code=202)
 async def create_run(
     req: RunCreateRequest,
     x_sentinel_env: Optional[str] = Header(default=None),
+    idempotency_key_header: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     """Creates and launches an independent incident investigation returning its immutable run_id."""
     svc = get_investigation_service()
     eff_env = x_sentinel_env or req.environment
+    eff_idemp = req.idempotency_key or idempotency_key_header
     fixture = _resolve_case_intake(
         case_id=req.case_id,
         target_service=req.target_service,
@@ -174,6 +186,7 @@ async def create_run(
     try:
         run_id = await svc.start_run(
             case_id=req.case_id,
+            idempotency_key=eff_idemp,
             incident_id=fixture["id"],
             alert_text=req.alert_text or fixture["alert_text"],
             incident_timestamp=req.incident_timestamp or fixture["incident_timestamp"],
@@ -188,9 +201,12 @@ async def create_run(
         )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except IdempotencyConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    return {"run_id": run_id, "status": "PENDING"}
+    rec = svc.repo.get_run(run_id)
+    return {"run_id": run_id, "status": rec.status if rec else "PENDING"}
 
 
 @app.get("/api/runs/{run_id}")
@@ -203,8 +219,7 @@ async def get_run_status(
     rec = svc.repo.get_run(run_id)
     if rec is None:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
-    if settings.SENTINEL_ENV_SCOPE and (x_sentinel_env or rec.environment) != settings.SENTINEL_ENV_SCOPE:
-        raise HTTPException(status_code=403, detail="Forbidden for this environment scope")
+    _enforce_env_scope(rec.environment, x_sentinel_env)
     return {
         "run_id": rec.run_id,
         "case_id": rec.case_id,
@@ -219,9 +234,16 @@ async def get_run_status(
 
 
 @app.post("/api/runs/{run_id}/cancel")
-async def cancel_run_endpoint(run_id: str):
+async def cancel_run_endpoint(
+    run_id: str,
+    x_sentinel_env: Optional[str] = Header(default=None),
+):
     """Cancels an active run cleanly and commits one terminal outcome."""
     svc = get_investigation_service()
+    existing = svc.repo.get_run(run_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+    _enforce_env_scope(existing.environment, x_sentinel_env)
     rec = await svc.cancel_run(run_id)
     if rec is None:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
@@ -233,12 +255,14 @@ async def stream_run_events(
     run_id: str,
     last_event_id: Optional[int] = None,
     last_event_id_header: Optional[int] = Header(default=None, alias="Last-Event-ID"),
+    x_sentinel_env: Optional[str] = Header(default=None),
 ):
     """Subscribes to sequenced SSE events for an existing run, supporting Last-Event-ID reconnection."""
     svc = get_investigation_service()
     rec = svc.repo.get_run(run_id)
     if rec is None:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+    _enforce_env_scope(rec.environment, x_sentinel_env)
     cursor = last_event_id if last_event_id is not None else (last_event_id_header or 0)
 
     async def sse_gen():
@@ -295,8 +319,7 @@ async def export_stored_run_brief(
     svc = get_investigation_service()
     rec = svc.repo.get_run(run_id)
     if rec is not None:
-        if settings.SENTINEL_ENV_SCOPE and (x_sentinel_env or rec.environment) != settings.SENTINEL_ENV_SCOPE:
-            raise HTTPException(status_code=403, detail="Forbidden for this environment scope")
+        _enforce_env_scope(rec.environment, x_sentinel_env)
         if fmt == "json" and rec.brief_json:
             return PlainTextResponse(content=rec.brief_json, media_type="application/json")
         if fmt == "markdown" and rec.brief_markdown:
@@ -371,10 +394,16 @@ class ApprovalRequest(BaseModel):
 
 
 @app.post("/api/remediation/{case_id}/approve")
-async def approve_remediation(case_id: str, req: ApprovalRequest):
+async def approve_remediation(
+    case_id: str,
+    req: ApprovalRequest,
+    x_sentinel_env: Optional[str] = Header(default=None),
+):
     """Idempotently records validated operator HITL decision linked to case/run/proposal identity."""
     if not re.fullmatch(r"^[a-zA-Z0-9_\-]{1,64}$", case_id):
         raise HTTPException(status_code=422, detail="Invalid case_id format; expected alphanumeric/underscore/hyphen identifier.")
+    eff_env = x_sentinel_env or req.environment
+    _enforce_env_scope(eff_env, x_sentinel_env)
     ts_now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     record = ApprovalRecord(
         case_id=case_id,
@@ -382,7 +411,7 @@ async def approve_remediation(case_id: str, req: ApprovalRequest):
         proposal_id=req.proposal_id,
         decision=req.decision,
         operator_id=req.operator_id,
-        environment=req.environment,
+        environment=eff_env,
         timestamp=ts_now,
     )
     get_investigation_service().repo.save_approval(record)

@@ -106,12 +106,27 @@ class PrometheusAdapter:
             }
 
         start_iso, end_iso = window
+        try:
+            s_dt = datetime.fromisoformat(str(start_iso).replace("Z", "+00:00"))
+            e_dt = datetime.fromisoformat(str(end_iso).replace("Z", "+00:00"))
+            if s_dt > e_dt:
+                return {
+                    "status": "TOOL_FAILURE",
+                    "promql": "",
+                    "error": f"Invalid inverted window: start '{start_iso}' exceeds end '{end_iso}'",
+                    "result": [],
+                    "formatted": "",
+                }
+        except ValueError:
+            pass
         # Sanitize step parameter against query string injection
         safe_step = re.sub(r"[^0-9a-zA-Z]", "", step) if step else "15s"
         promql = eff_templates[metric_type].format(service=service)
         effective_timeout = max(0.001, timeout_override) if timeout_override is not None else self.timeout
         client = self._get_client()
 
+        import time as _time
+        q_start = _time.perf_counter()
         try:
             resp = await client.get(
                 f"{self.base_url}/api/v1/query_range",
@@ -123,12 +138,15 @@ class PrometheusAdapter:
                     resp_json = resp.json()
                     resp_data = resp_json.get("data") or {}
                     if not resp_data.get("result"):
-                        # Time-anchored fallback to instant query at incident end timestamp
-                        resp = await client.get(
-                            f"{self.base_url}/api/v1/query",
-                            params={"query": promql, "time": end_iso},
-                            timeout=effective_timeout,
-                        )
+                        elapsed = _time.perf_counter() - q_start
+                        rem_timeout = effective_timeout - elapsed
+                        # Time-anchored fallback only within the remaining query budget (never doubles timeout)
+                        if rem_timeout >= 0.25 and not metric_type.endswith("_total"):
+                            resp = await client.get(
+                                f"{self.base_url}/api/v1/query",
+                                params={"query": promql, "time": end_iso},
+                                timeout=rem_timeout,
+                            )
                 except (json.JSONDecodeError, ValueError):
                     pass
 
@@ -145,8 +163,12 @@ class PrometheusAdapter:
                     "formatted": "",
                 }
 
-            # Cap series count to prevent context exhaustion
+            # Cap series count to prevent context exhaustion while disclosing truncation
+            total_series_count = len(data)
             capped_data = data[:max_series]
+            retained_series_count = len(capped_data)
+            truncated = total_series_count > retained_series_count
+            coverage_status = "PARTIAL" if truncated else ("COMPLETE" if capped_data else "EMPTY")
             status = "SUCCESS" if capped_data else "EMPTY"
 
             formatted = wrap_telemetry(
@@ -157,7 +179,11 @@ class PrometheusAdapter:
                 "status": status,
                 "promql": promql,
                 "result": capped_data,
-                "series_count": len(capped_data),
+                "series_count": retained_series_count,
+                "retained_series_count": retained_series_count,
+                "total_series_count": total_series_count,
+                "truncated": truncated,
+                "coverage_status": coverage_status,
                 "formatted": formatted
             }
         except (httpx.HTTPError, json.JSONDecodeError, ValueError, Exception) as e:

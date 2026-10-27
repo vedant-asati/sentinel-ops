@@ -39,12 +39,34 @@ def load_holdout(path):
                 raise ValueError("supported holdout cases require service, mechanism and citations")
         elif (service, mechanism, refs) != (None, None, []):
             raise ValueError("non-diagnostic holdout cases cannot have a causal answer")
-        cases.append(Case("holdout/" + record["family"], incident, status, service, mechanism, tuple(refs)))
+        cases.append(Case(
+            "holdout/" + record["family"],
+            incident,
+            status,
+            service,
+            mechanism,
+            expected.get("scope") or ("affected_request" if status == SUPPORTED else None),
+            tuple(refs),
+            localized_service=expected.get("localized_service"),
+            localized_operation=expected.get("localized_operation"),
+            expected_coverage=expected.get("coverage"),
+            required_check_terms=tuple(expected.get("required_check_terms") or ()),
+        ))
     return cases
 
 
 def grade(case: Case, decision: dict) -> list[str]:
-    fields = {"status", "service", "mechanism", "citations"}
+    fields = {
+        "status",
+        "service",
+        "mechanism",
+        "scope",
+        "citations",
+        "localized_service",
+        "localized_operation",
+        "coverage",
+        "next_check",
+    }
     if not isinstance(decision, dict) or set(decision) != fields:
         return ["invalid decision schema"]
     refs = decision["citations"]
@@ -57,8 +79,20 @@ def grade(case: Case, decision: dict) -> list[str]:
         problems.append("wrong service")
     if decision["mechanism"] != case.mechanism:
         problems.append("wrong mechanism")
+    if decision["scope"] != case.scope:
+        problems.append("wrong claim scope")
     if set(refs) != set(case.required_refs) or len(set(refs)) != len(refs):
         problems.append("incorrect causal citations")
+    if decision["localized_service"] != case.localized_service:
+        problems.append("wrong localized service")
+    if decision["localized_operation"] != case.localized_operation:
+        problems.append("wrong localized operation")
+    if case.expected_coverage is not None and decision["coverage"] != case.expected_coverage:
+        problems.append("incorrect coverage disclosure")
+    if case.required_check_terms:
+        chk = (decision.get("next_check") or "").lower()
+        if not chk or any(term.lower() not in chk for term in case.required_check_terms):
+            problems.append("missing discriminating next check")
     return problems
 
 

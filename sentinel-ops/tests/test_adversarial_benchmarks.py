@@ -180,10 +180,15 @@ def test_runner_reports_unavailable_when_all_single_pass_llm_calls_fail(capsys, 
     class _FakeAgent:
         def diagnose(self, case, resume_thread_id=None, use_llm=False):
             gt = gt_map[case["id"]]
+            pilot_mechs = {"db_pool_exhaustion", "pool_acquisition_timeout", "upstream_connect_timeout"}
+            supported = (
+                gt.get("expected_terminal_status") == "SUPPORTED_DIAGNOSIS"
+                and gt.get("mechanism") in pilot_mechs
+            )
             return {
-                "terminal_status": gt.get("expected_terminal_status", "INSUFFICIENT_EVIDENCE"),
-                "diagnosed_root_cause": gt.get("root_cause_service", "unknown"),
-                "mechanism": gt.get("mechanism", "none"),
+                "terminal_status": "SUPPORTED_DIAGNOSIS" if supported else "INSUFFICIENT_EVIDENCE",
+                "diagnosed_root_cause": gt.get("root_cause_service", "unknown") if supported else "unknown",
+                "mechanism": gt.get("mechanism", "none") if supported else None,
                 "claims": [],
                 "evidence": [],
                 "elapsed_seconds": 0.01,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 import yaml
@@ -9,6 +10,8 @@ import yaml
 from sentinel_ops.profiles.schema import SystemProfile
 
 
+logger = logging.getLogger(__name__)
+BUNDLED_PROFILES_DIR = Path(__file__).resolve().parent / "bundled"
 PROFILES_DIR = Path(__file__).resolve().parents[3] / "profiles"
 _PROFILE_CACHE: Dict[str, SystemProfile] = {}
 
@@ -23,12 +26,14 @@ def load_profile_file(path: Path) -> SystemProfile:
 
 
 def _ensure_builtin_profiles_loaded() -> None:
-    if PROFILES_DIR.exists():
-        for pfile in sorted(PROFILES_DIR.glob("*.y*ml")):
-            try:
-                load_profile_file(pfile)
-            except Exception:
-                continue
+    for directory in (BUNDLED_PROFILES_DIR, PROFILES_DIR):
+        if directory.exists():
+            for pfile in sorted(directory.glob("*.y*ml")):
+                try:
+                    load_profile_file(pfile)
+                except Exception as exc:
+                    logger.warning("Skipping invalid profile file %s: %s", pfile, exc)
+                    continue
 
 
 def list_profiles() -> List[SystemProfile]:

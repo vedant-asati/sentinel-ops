@@ -39,6 +39,61 @@ def load_fixture(case_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+async def _probe_live_preflight(
+    profile,
+    target_service: str,
+    window: tuple[str, str],
+) -> Dict[str, Any]:
+    """Stage 2 preflight: read-only backend probe verifying observable signals, replica labels, and traces."""
+    from sentinel_ops.mcp.prometheus_adapter import PrometheusAdapter
+    from sentinel_ops.mcp.tempo_adapter import TempoAdapter
+    from sentinel_ops.telemetry.normalize import extract_replica_key
+
+    prom = PrometheusAdapter()
+    tempo = TempoAdapter()
+    observable: set[str] = set()
+    identities: Dict[str, List[str]] = {}
+    empty_count = 0
+    error_count = 0
+    templates = profile.to_promql_templates()
+    allowed = profile.resolve_service_names()
+    try:
+        for logical, mapping in profile.signals.items():
+            svc = next((s for s, sp in profile.services.items() if logical in sp.metrics or mapping.metric_name in sp.metrics), target_service)
+            res = await prom.query_metric(
+                service=svc,
+                metric_type=logical,
+                window=window,
+                allowed_services=allowed,
+                promql_templates=templates,
+            )
+            st = res.get("status", "EMPTY")
+            if st == "SUCCESS" and res.get("result"):
+                observable.add(logical)
+                observable.add(mapping.metric_name)
+                rkeys = [extract_replica_key(e.get("metric") or {}) for e in res.get("result", [])]
+                identities[logical] = [k or "unlabeled" for k in rkeys]
+            elif st == "EMPTY":
+                empty_count += 1
+            else:
+                error_count += 1
+
+        tid = await tempo.search_traces(service=target_service, start_iso=window[0], end_iso=window[1], limit=5)
+        trace_status = "OBSERVED" if tid else "INCONCLUSIVE_EMPTY_WINDOW"
+    finally:
+        await prom.aclose()
+        await tempo.aclose()
+
+    window_inconclusive = len(observable) == 0 and error_count == 0
+    return {
+        "observable_signals": sorted(observable),
+        "replica_identities": identities,
+        "trace_availability": trace_status,
+        "window_inconclusive": window_inconclusive,
+        "error_count": error_count,
+    }
+
+
 def run_triage(
     case_id: Optional[str] = "case_01",
     live: bool = False,
@@ -49,7 +104,7 @@ def run_triage(
     export_brief: Optional[str] = None,
     brief_format: str = "markdown",
     auto_approve: bool = False,
-    export_dpo: bool = True,
+    export_dpo: bool = False,
     profile_id: str = "checkout-demo",
     environment: str = "default",
     incident_timestamp: Optional[str] = None,
@@ -58,15 +113,43 @@ def run_triage(
     preflight: bool = False,
 ) -> Dict[str, Any]:
     """Executes end-to-end incident investigation triage with interactive Rich output."""
+    from sentinel_ops.agents.supervisor import compute_incident_window
     from sentinel_ops.profiles.registry import get_profile
 
     profile = get_profile(profile_id)
     if preflight:
-        pf = profile.preflight()
-        console.print(f"\n[bold cyan]SystemProfile Preflight:[/bold cyan] {profile.profile_id} (v{profile.version}, env={environment})")
+        warnings = profile.validate_mappings()
+        console.print(f"\n[bold cyan]SystemProfile Stage 1 Preflight (Mapping Validation):[/bold cyan] {profile.profile_id} (v{profile.version}, env={environment})")
+        if warnings:
+            for w in warnings:
+                console.print(f"  [yellow]WARNING:[/yellow] {w}")
+        else:
+            console.print("  [green]Mappings valid:[/green] no cumulative/ratio mismatches or missing capacities.")
+
+        live_probe: Optional[Dict[str, Any]] = None
+        available: Optional[set[str]] = None
+        if live:
+            ts = incident_timestamp or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            win = compute_incident_window(ts, before_minutes=window_before_minutes, after_minutes=window_after_minutes)
+            svc0 = target_service or next(iter(profile.resolve_service_names()), "checkout-service")
+            live_probe = asyncio.run(_probe_live_preflight(profile, svc0, win))
+            available = set(live_probe["observable_signals"])
+            console.print(f"\n[bold cyan]Stage 2 Preflight (Read-Only Backend Probe [{win[0]}..{win[1]}]):[/bold cyan]")
+            if live_probe["window_inconclusive"]:
+                console.print("  [yellow]INCONCLUSIVE AVAILABILITY:[/yellow] empty incident window returned zero samples; re-run against an active traffic window.")
+            else:
+                console.print(f"  Observable signals ({len(available)}): {', '.join(live_probe['observable_signals']) or 'none'}")
+                console.print(f"  Trace availability: {live_probe['trace_availability']}")
+
+        pf = profile.preflight(available_signals=available if (live and not (live_probe or {}).get("window_inconclusive")) else None)
         for rule_id, res in pf.items():
             console.print(f"  - {rule_id}: [bold]{res.status}[/bold] ({res.notes})")
-        return {"profile_id": profile.profile_id, "preflight": {k: v.model_dump() for k, v in pf.items()}}
+        return {
+            "profile_id": profile.profile_id,
+            "mapping_warnings": warnings,
+            "live_probe": live_probe,
+            "preflight": {k: v.model_dump() for k, v in pf.items()},
+        }
 
     console.print("\n[bold cyan]════════════════════════════════════════════════════════════════════════════[/bold cyan]")
     console.print("[bold white]Sentinel-Ops Autonomous AI SRE: Incident Triage & Root Cause Analysis[/bold white]")
@@ -189,9 +272,17 @@ def run_triage(
             "Query downstream microservice database connection pool metrics",
             "Verify OpenTelemetry distributed trace collector health",
         ])
+        loc = final_state.get("localized_dependency") or {}
+        rule_eval = final_state.get("rule_evaluation") or {}
+        loc_line = ""
+        if loc.get("bottleneck_service"):
+            loc_line = f"[bold cyan]Localized Bottleneck:[/bold cyan] {loc['bottleneck_service']} ({loc.get('bottleneck_operation') or 'slow_span'}, {loc.get('exclusive_duration_ms', 0.0):.1f}ms)\n"
+        cov_line = f"[bold cyan]Coverage Status:[/bold cyan] {rule_eval.get('coverage_status', 'UNKNOWN')}\n"
         console.print(
             Panel(
                 f"[bold red]ABSTENTION TRIGGERED:[/bold red] {final_state.get('terminal_reason')}\n"
+                f"{loc_line}"
+                f"{cov_line}"
                 f"[bold yellow]Safety Invariant:[/bold yellow] Automated remediation is strictly prohibited on inconclusive signals.\n\n"
                 f"[bold cyan]Actionable Next Discriminating Checks for Operator:[/bold cyan]\n" +
                 "\n".join(f"  • {chk}" for chk in next_checks),
@@ -373,6 +464,9 @@ def main() -> int:
         )
     except BrokenPipeError:
         return 0
+    except (KeyError, ValueError) as exc:
+        console.print(f"[bold red]Configuration / Profile Error:[/bold red] {exc}")
+        return 1
 
     if args.preflight:
         return 0

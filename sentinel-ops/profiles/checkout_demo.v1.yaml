@@ -20,18 +20,21 @@ services:
       - postgres-db
     metrics:
       - pool_active
+      - latency_p95
       - error_rate
       - pool_acquire_timeouts
       - upstream_connect_timeouts
-    replica_join_labels: [pod, instance, container, service]
+    replica_labels: [pod, instance, container]
   pricing-service:
     name: pricing-service
     role: service
     metrics:
       - latency_p95
       - cpu_utilization
+      - pool_active
       - pool_acquire_timeouts
       - upstream_connect_timeouts
+    replica_labels: [pod, instance, container]
   cart-service:
     name: cart-service
     role: service

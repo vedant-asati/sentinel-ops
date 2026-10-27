@@ -1,19 +1,17 @@
 # Sentinel-Ops Platform
 
-> **Autonomous AI Site Reliability Engineering (AI SRE) & Root Cause Analysis Platform**  
-> Powered by LangGraph multi-agent teams, Topology-Aware GraphRAG, CRAG sufficiency gating, fresh-context adversarial red-teaming, FastMCP telemetry integration, and DPO trajectory logging.
+> **Read-Only SRE Incident Triage & Observability Contract Platform**  
+> Built with LangGraph, SystemProfile-driven telemetry normalization, CRAG sufficiency gating, independent claim/span verification, profile-aware FastMCP schemas, and optional opt-in DPO trajectory logging.
 
 ---
 
 ## 🚀 Key Architecture Highlights
 
-- **Evidence-Backed Investigation:** All claims must cite deterministic telemetry observations (`EV-xxx`). Citations to failed or empty telemetry are deterministically rejected.
-- **Strict Terminal Safety Invariants:** Explicitly distinguishes confirmed causes (`SUPPORTED_DIAGNOSIS`) from absent telemetry (`INSUFFICIENT_EVIDENCE`), strictly refusing ungrounded remediation proposals.
-- **Fresh-Context Adversarial Red-Team Reviewer:** A skeptic prosecutor node with zero access to prior conversational reasoning evaluates draft claims against raw telemetry to prevent confirmation bias.
-- **Topology-Aware GraphRAG:** Combines text semantic similarity ($\text{CosineSim}$), microservice dependency topological distance ($1 / (1 + \text{GraphDistance})$), and exponential recency decay ($e^{-\Delta t / \tau}$) to retrieve relevant incident postmortems.
-- **Direct Preference Optimization (DPO) Trajectory Pipeline:** Pairs grounded, verified agent executions against baseline hallucinated runs, exporting $(y_w, y_l)$ trajectory pairs to `data/dpo/trajectories.jsonl`.
-- **Server-Enforced Telemetry Bounds & Prompt-Injection Firewall:** Server-side parameterized queries anchored strictly to $T_{\text{incident}} \pm \Delta t$ with automated credential scrubbing, defanging, and length capping.
-- **Reverse Upstream Blast Radius Traversal:** Navigates caller dependencies (`nx.ancestors()`) to accurately quantify transitive blast radius impact before remediation.
+- **Evidence-Backed Investigation:** Claims cite immutable typed observations (`OBS-prom-...` / `OBS-tempo-...`) backed by explicit `ProbeAttempt` provenance, `claim_scope`, and replica/series coverage disclosures (`PARTIAL` on truncated responses).
+- **Strict Terminal Safety Invariants:** Explicitly distinguishes confirmed timeout mechanisms (`SUPPORTED_DIAGNOSIS`) from inconclusive/invalid measurements (`INSUFFICIENT_EVIDENCE` with localized bottleneck + discriminating check) and collector outages (`OPERATIONAL_FAILURE`).
+- **Independent Claim & Span Verifier:** Verifies citations, sample timestamps, replica keys, span IDs, and timeout preconditions directly against immutable observations without re-invoking rule selection.
+- **Two-Stage Preflight:** Validates signal semantics (rejecting cumulative counters mapped as utilization gauges) and optionally probes read-only live Prometheus/Tempo endpoints.
+- **Single-Process Pilot Controls:** SQLite run persistence with startup orphan recovery, `(environment, idempotency_key)` deduplication (`409` on payload conflict), per-backend semaphore budgets, and environment-scoped access enforcement.
 
 ---
 
