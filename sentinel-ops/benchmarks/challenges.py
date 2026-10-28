@@ -246,6 +246,7 @@ def generate(seed: int) -> list[Case]:
                         "memory_usage": {"status": "SUCCESS", "result": [{"metric": {"service": "cart-service", "pod": "cart-a"}, "values": [[anchor - 30, 0.96], [anchor, 0.99]]}]},
                         "container_restarts": {"status": "SUCCESS", "result": [{"metric": {"service": "cart-service", "pod": "cart-b"}, "values": [[anchor - 30, 3], [anchor, 3]]}]},
                     }
+                    loc_svc, loc_op = "checkout-service", "checkout"
                 elif family in ("raw-cpu-seconds-overflow", "in-range-cumulative-cpu"):
                     cpu_val = 120.0 if family == "raw-cpu-seconds-overflow" else 0.4
                     metrics[service][counter]["values"][-1][1] = metrics[service][counter]["values"][0][1]
