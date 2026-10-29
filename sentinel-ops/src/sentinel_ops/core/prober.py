@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from sentinel_ops.core.config import settings
-from sentinel_ops.core.llm import get_chat_model
+from sentinel_ops.core.llm import get_chat_model, get_gemini_key_ring, mask_api_key
 
 console = Console()
 
@@ -29,42 +29,54 @@ class SmokeTestSchema(BaseModel):
 
 
 async def async_list_available_gemini_models() -> List[str]:
-    """Non-blocking async Gemini catalog lookup using httpx.AsyncClient."""
-    if not settings.GEMINI_API_KEY:
+    """Non-blocking async Gemini catalog lookup failing over across configured API keys."""
+    keys = get_gemini_key_ring().acquire_ordered_candidates()
+    if not keys:
         return []
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={settings.GEMINI_API_KEY}"
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, headers={"User-Agent": "Sentinel-Ops/0.1"})
-            resp.raise_for_status()
-            data = resp.json()
-            return [
-                m["name"].replace("models/", "")
-                for m in data.get("models", [])
-                if "generateContent" in m.get("supportedGenerationMethods", [])
-            ]
-    except Exception as e:
-        console.print(f"[bold red]Failed to fetch Gemini model catalog: {e}[/bold red]")
-        return []
+    url = "https://generativelanguage.googleapis.com/v1beta/models"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for key in keys:
+            try:
+                resp = await client.get(
+                    url,
+                    headers={"x-goog-api-key": key, "User-Agent": "Sentinel-Ops/0.1"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return [
+                    m["name"].replace("models/", "")
+                    for m in data.get("models", [])
+                    if "generateContent" in m.get("supportedGenerationMethods", [])
+                ]
+            except Exception as e:
+                get_gemini_key_ring().mark_failure(key, e)
+    console.print("[bold red]Failed to fetch Gemini model catalog across configured API keys.[/bold red]")
+    return []
 
 
 def list_available_gemini_models() -> List[str]:
-    """Queries the Gemini API to list models supporting content generation."""
-    if not settings.GEMINI_API_KEY:
+    """Queries the Gemini API using header-based auth with failover across configured keys."""
+    keys = get_gemini_key_ring().acquire_ordered_candidates()
+    if not keys:
         return []
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={settings.GEMINI_API_KEY}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Sentinel-Ops/0.1"})
-    try:
-        with urllib.request.urlopen(req, timeout=10.0) as resp:
-            data = json.loads(resp.read().decode())
-            return [
-                m["name"].replace("models/", "")
-                for m in data.get("models", [])
-                if "generateContent" in m.get("supportedGenerationMethods", [])
-            ]
-    except Exception as e:
-        console.print(f"[bold red]Failed to fetch Gemini model catalog: {e}[/bold red]")
-        return []
+    url = "https://generativelanguage.googleapis.com/v1beta/models"
+    for key in keys:
+        req = urllib.request.Request(
+            url,
+            headers={"x-goog-api-key": key, "User-Agent": "Sentinel-Ops/0.1"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10.0) as resp:
+                data = json.loads(resp.read().decode())
+                return [
+                    m["name"].replace("models/", "")
+                    for m in data.get("models", [])
+                    if "generateContent" in m.get("supportedGenerationMethods", [])
+                ]
+        except Exception as e:
+            get_gemini_key_ring().mark_failure(key, e)
+    console.print("[bold red]Failed to fetch Gemini model catalog across configured API keys.[/bold red]")
+    return []
 
 
 async def async_run_structured_output_smoke_test(model_name: Optional[str] = None) -> ProbeResult:
@@ -121,11 +133,13 @@ def probe_and_display() -> bool:
     console.print("[bold white]Sentinel-Ops: Pre-Flight LLM & Model Capabilities Probe[/bold white]")
     console.print("[bold cyan]════════════════════════════════════════════════════════════[/bold cyan]")
 
-    if not settings.GEMINI_API_KEY:
-        console.print("[bold red]❌ ERROR: GEMINI_API_KEY is not set in environment or .env![/bold red]")
+    keys = settings.resolve_gemini_api_keys()
+    if not keys:
+        console.print("[bold red]❌ ERROR: No GEMINI_API_KEY configured in environment or .env![/bold red]")
         return False
 
-    console.print("[green]✔ GEMINI_API_KEY found[/green] (mask: " + settings.GEMINI_API_KEY[:6] + "..." + settings.GEMINI_API_KEY[-4:] + ")")
+    masks = ", ".join(mask_api_key(k) for k in keys)
+    console.print(f"[green]✔ {len(keys)} Gemini API key(s) configured[/green] (masks: {masks})")
     
     # 1. Catalog check
     models = list_available_gemini_models()

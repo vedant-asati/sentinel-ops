@@ -12,33 +12,41 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 from sentinel_ops.core.config import settings
-from sentinel_ops.core.llm import get_chat_model
+from sentinel_ops.core.llm import get_chat_model, invoke_with_gemini_failover
 
 logger = logging.getLogger(__name__)
 
 
 class AsyncRateLimiter:
-    """Simple async interval limiter preventing 15 RPM quota exhaustion."""
+    """Per-key async interval limiter preventing 15 RPM quota exhaustion on any single key."""
 
     def __init__(self, min_interval_sec: float = 4.2):
         self.min_interval_sec = min_interval_sec
         self._last_call: float = 0.0
+        self._last_by_key: Dict[str, float] = {}
         self._lock: Optional[asyncio.Lock] = None
 
-    async def acquire(self, deadline_timestamp: Optional[float] = None) -> bool:
+    async def acquire(
+        self,
+        deadline_timestamp: Optional[float] = None,
+        api_key: str = "__default__",
+    ) -> bool:
         """Waits cleanly for rate-limit slot unless waiting would breach deadline_timestamp."""
         if self._lock is None:
             self._lock = asyncio.Lock()
         async with self._lock:
             now = time.monotonic()
-            wait = (self.min_interval_sec - (now - self._last_call)) if self._last_call > 0 else 0.0
+            last_for_key = self._last_by_key.get(api_key, 0.0)
+            wait = (self.min_interval_sec - (now - last_for_key)) if last_for_key > 0 else 0.0
             if deadline_timestamp is not None:
                 rem_after_wait = deadline_timestamp - (now + max(0.0, wait))
                 if rem_after_wait <= 1.0:
                     return False
             if wait > 0:
                 await asyncio.sleep(wait)
-            self._last_call = time.monotonic()
+            done = time.monotonic()
+            self._last_call = done
+            self._last_by_key[api_key] = done
             return True
 
 
@@ -77,15 +85,9 @@ async def refine_brief_with_llm(
     deadline_timestamp: Optional[float] = None,
 ) -> Optional[LLMBriefNarrative]:
     """Synthesizes an operator-friendly Incident Brief strictly constrained to verified citations."""
-    if not settings.GEMINI_API_KEY or not verified_claims:
+    if not settings.resolve_gemini_api_keys() or not verified_claims:
         return None
 
-    remaining = (deadline_timestamp - time.monotonic()) if deadline_timestamp else settings.PER_LLM_TIMEOUT_SECONDS
-    if remaining <= 1.0:
-        return None
-
-    if not await _GEMINI_RATE_LIMITER.acquire(deadline_timestamp=deadline_timestamp):
-        return None
     remaining = (deadline_timestamp - time.monotonic()) if deadline_timestamp else settings.PER_LLM_TIMEOUT_SECONDS
     if remaining <= 1.0:
         return None
@@ -98,11 +100,20 @@ async def refine_brief_with_llm(
         f"Candidate Next Checks: {json.dumps(next_checks)}\n\n"
         "Rule: Only reference metrics, services, and [EV-xxx] IDs explicitly present above."
     )
-    try:
-        llm = get_chat_model(role="synthesizer")
+
+    async def _attempt(api_key: str, timeout: float) -> Optional[LLMBriefNarrative]:
+        if not await _GEMINI_RATE_LIMITER.acquire(deadline_timestamp=deadline_timestamp, api_key=api_key):
+            raise TimeoutError("Rate-limit wait would exceed run deadline")
+        llm = get_chat_model(role="synthesizer", timeout=timeout, api_key=api_key)
         structured = llm.with_structured_output(LLMBriefNarrative)
-        timeout = min(settings.PER_LLM_TIMEOUT_SECONDS, max(1.0, remaining))
-        return await asyncio.wait_for(structured.ainvoke(prompt), timeout=timeout)
+        return await structured.ainvoke(prompt)
+
+    try:
+        return await invoke_with_gemini_failover(
+            _attempt,
+            per_attempt_timeout=settings.PER_LLM_TIMEOUT_SECONDS,
+            deadline_timestamp=deadline_timestamp,
+        )
     except Exception as exc:
         logger.warning("LLM brief narrative refinement unavailable (%s); keeping deterministic summary.", exc)
         return None
@@ -117,16 +128,10 @@ async def plan_probes_with_llm(
     allowed_services: Optional[List[str]] = None,
     allowed_signals: Optional[List[str]] = None,
 ) -> Optional[LLMInvestigationPlan]:
-    """Uses Gemini (gemini-3.5-flash-lite) to prioritize competing hypotheses and metric probes."""
-    if not settings.GEMINI_API_KEY:
+    """Uses Gemini (gemini-3.5-flash-lite) across rotated API keys to prioritize probes."""
+    if not settings.resolve_gemini_api_keys():
         return None
 
-    remaining = (deadline_timestamp - time.monotonic()) if deadline_timestamp else settings.PER_LLM_TIMEOUT_SECONDS
-    if remaining <= 1.0:
-        return None
-
-    if not await _GEMINI_RATE_LIMITER.acquire(deadline_timestamp=deadline_timestamp):
-        return None
     remaining = (deadline_timestamp - time.monotonic()) if deadline_timestamp else settings.PER_LLM_TIMEOUT_SECONDS
     if remaining <= 1.0:
         return None
@@ -154,11 +159,19 @@ async def plan_probes_with_llm(
         "that best discriminate candidate failure mechanisms."
     )
 
-    try:
-        llm = get_chat_model(role="supervisor")
+    async def _attempt(api_key: str, timeout: float) -> Optional[LLMInvestigationPlan]:
+        if not await _GEMINI_RATE_LIMITER.acquire(deadline_timestamp=deadline_timestamp, api_key=api_key):
+            raise TimeoutError("Rate-limit wait would exceed run deadline")
+        llm = get_chat_model(role="supervisor", timeout=timeout, api_key=api_key)
         structured = llm.with_structured_output(LLMInvestigationPlan)
-        timeout = min(settings.PER_LLM_TIMEOUT_SECONDS, max(1.0, remaining))
-        result = await asyncio.wait_for(structured.ainvoke(prompt), timeout=timeout)
+        return await structured.ainvoke(prompt)
+
+    try:
+        result = await invoke_with_gemini_failover(
+            _attempt,
+            per_attempt_timeout=settings.PER_LLM_TIMEOUT_SECONDS,
+            deadline_timestamp=deadline_timestamp,
+        )
         if result and result.probes:
             filtered = [
                 p for p in result.probes
@@ -177,7 +190,7 @@ async def run_live_single_pass_gemini(
     telemetry_bundle: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Executes an actual unconstrained single-pass Gemini prompt for honest benchmark comparison."""
-    if not settings.GEMINI_API_KEY:
+    if not settings.resolve_gemini_api_keys():
         return {
             "baseline": "live_single_pass_gemini",
             "diagnosed_root_cause": "unavailable",
@@ -185,18 +198,22 @@ async def run_live_single_pass_gemini(
             "terminal_status": "OPERATIONAL_FAILURE",
         }
 
-    await _GEMINI_RATE_LIMITER.acquire()
     prompt = (
         f"Alert on {target_service}: {alert_text}\n"
         f"Telemetry snapshot: {json.dumps(telemetry_bundle)[:6000]}\n\n"
         "Diagnose the most likely root cause service and mechanism, or abstain as INSUFFICIENT_EVIDENCE if signals are missing."
     )
-    try:
-        llm = get_chat_model(role="supervisor")
+
+    async def _attempt(api_key: str, timeout: float) -> SinglePassDiagnosisSchema:
+        await _GEMINI_RATE_LIMITER.acquire(api_key=api_key)
+        llm = get_chat_model(role="supervisor", timeout=timeout, api_key=api_key)
         structured = llm.with_structured_output(SinglePassDiagnosisSchema)
-        res: SinglePassDiagnosisSchema = await asyncio.wait_for(
-            structured.ainvoke(prompt),
-            timeout=settings.PER_LLM_TIMEOUT_SECONDS,
+        return await structured.ainvoke(prompt)
+
+    try:
+        res: SinglePassDiagnosisSchema = await invoke_with_gemini_failover(
+            _attempt,
+            per_attempt_timeout=settings.PER_LLM_TIMEOUT_SECONDS,
         )
         return {
             "baseline": "live_single_pass_gemini",
