@@ -1,6 +1,6 @@
 # Sentinel-Ops: Evidence-Grounded Incident Investigation & Observability Gym
 
-[![CI/CD](https://github.com/vedant-asati/Sentinel-Ops-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/vedant-asati/Sentinel-Ops-Platform/actions/workflows/ci.yml)
+[![CI/CD](https://github.com/vedant-asati/sentinel-ops/actions/workflows/ci.yml/badge.svg)](https://github.com/vedant-asati/sentinel-ops/actions/workflows/ci.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-orange.svg)](https://github.com/langchain-ai/langgraph)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
