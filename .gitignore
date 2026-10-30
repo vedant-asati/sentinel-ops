@@ -47,6 +47,4 @@ htmlcov/
 **/data/dpo/
 *.log
 
-tmp/**
-!tmp/reviews/
-!tmp/reviews/**
+tmp/

@@ -199,4 +199,3 @@ uv run python -m sentinel_ops.chaos recover
 - [High-Level Design Specification (HLD)](docs/HLD.md)
 - [Detailed Low-Level Design Specification (LLD)](docs/LLD.md)
 - [Portfolio & Technical Deep-Dive Guide](docs/PORTFOLIO_GUIDE.md)
-- [SDE & AI Engineering STAR Interview Guide](docs/RESUME_STAR_GUIDE.md)
