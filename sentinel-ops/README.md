@@ -17,16 +17,16 @@
 
 ## 🛠️ Quickstart
 
-### 1. Run Verification Test Suite (18 Automated Unit Tests)
+### 1. Run Verification Test Suite (242 Tests)
 ```bash
 cd sentinel-ops
-uv run pytest
+uv run --extra dev pytest -v
 ```
 
-### 2. Run Comparative Replay Benchmark (3 Held-Out Cases)
-Replays Payment DB connection exhaustion, Pricing CPU algorithmic latency, and Telemetry Signal Withheld (Abstention Test):
+### 2. Run Replay Matrix & Blind Counterfactual Gate (5 Replay Cases + 84 Challenge Cases)
 ```bash
-uv run python -m benchmarks.runner
+uv run --extra dev python -m benchmarks.runner
+uv run --extra dev python -m benchmarks.challenge_gate --seed 20261124
 ```
 
 ### 3. Interactive Operator CLI
@@ -60,14 +60,14 @@ docker compose up -d
 
 ## 📊 Evaluation Matrix
 
-| Case ID | Incident Ground Truth | Deterministic Baseline | Single-Pass LLM | Sentinel-Ops LangGraph Agent |
+| Case ID | Incident Ground Truth | Deterministic Rules | Ungrounded Heuristic | Sentinel-Ops LangGraph Agent |
 | :--- | :--- | :--- | :--- | :--- |
 | **`case_01`** | `payment-service` (DB pool exhaustion) | `payment-service` [SUPP] | `payment-service` [SUPP] | **`payment-service` (SUPPORTED)** |
-| **`case_02`** | `pricing-service` (CPU latency spike) | `pricing-service` [SUPP] | `pricing-service` [SUPP] | **`pricing-service` (SUPPORTED)** |
-| **`case_03`** | `unknown` (Telemetry signal withheld) | `unknown` [INSU] | `checkout-service` [SUPP] *(Hallucinated!)* | **`ABSTAINED` (INSUFFICIENT)** |
+| **`case_02`** | `pricing-service` (CPU algorithmic latency) | `pricing-service` [SUPP] | `pricing-service` [SUPP] | **`pricing-service` (Localized · ABSTAINED in pilot)** |
+| **`case_03`** | `unknown` (Telemetry signal withheld) | `unknown` [INSU] | `checkout-service` [SUPP] *(Overclaimed!)* | **`ABSTAINED` (INSUFFICIENT)** |
 
 **Metrics:**
-- **Root-Cause Precision:** 100% across cases with present telemetry.
-- **Correct Abstention Rate:** 100% on withheld signals.
-- **Citation Contract Support:** 100% of claims backed by verified observations.
-- **Adversarial Entailment:** Eliminates hallucinated assumptions.
+- **Supported Diagnosis Precision:** 100.0% (pilot-certified timeout mechanisms).
+- **Safe Abstention & Localization Rate:** 100.0% on withheld/non-pilot cases.
+- **Blind Counterfactual Gate:** **84 / 84 (100%)** passing with 0 false-support decisions.
+- **Citation Contract & Verifier:** 100% of claims backed by verified immutable observations.

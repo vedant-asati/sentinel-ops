@@ -47,4 +47,8 @@ htmlcov/
 **/data/dpo/
 *.log
 
+# Internal workspace & private drafts
 tmp/
+reviews/
+docs/
+AGENTS.md
