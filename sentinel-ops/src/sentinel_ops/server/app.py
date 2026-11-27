@@ -59,7 +59,7 @@ async def lifespan(_app: FastAPI):
         await svc.aclose()
 
 
-app = FastAPI(title="Sentinel-Ops Cyber Command Center", version="3.0.0", lifespan=lifespan)
+app = FastAPI(title="Sentinel-Ops Incident Console", version="0.1.0", lifespan=lifespan)
 
 FIXTURES_DIR = Path(__file__).resolve().parents[3] / "benchmarks" / "fixtures"
 
@@ -433,13 +433,13 @@ async def mcp_jsonrpc_endpoint(request: Dict[str, Any]):
 
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard():
-    """Serves the zero-build Cyber Command Center single-page dashboard."""
+    """Serves the zero-build Incident Console single-page dashboard."""
     html = """<!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sentinel-Ops Cyber Command Center</title>
+    <title>Sentinel-Ops Incident Console</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
@@ -459,7 +459,7 @@ async def get_dashboard():
     <header class="border-b border-gray-800 bg-[#111827]/80 backdrop-blur px-6 py-4 flex items-center justify-between sticky top-0 z-50">
         <div class="flex items-center space-x-3">
             <div class="w-3 h-3 bg-emerald-500 rounded-full animate-ping"></div>
-            <h1 class="text-xl font-bold tracking-wider text-emerald-400">SENTINEL-OPS <span class="text-xs text-cyan-400 font-normal px-2 py-0.5 bg-cyan-950/60 rounded border border-cyan-800">CYBER COMMAND CENTER</span></h1>
+            <h1 class="text-xl font-bold tracking-wider text-emerald-400">SENTINEL-OPS <span class="text-xs text-cyan-400 font-normal px-2 py-0.5 bg-cyan-950/60 rounded border border-cyan-800">INCIDENT CONSOLE</span></h1>
         </div>
         <div class="flex items-center space-x-4">
             <span class="text-xs text-gray-400">Active Scenario:</span>

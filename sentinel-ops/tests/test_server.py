@@ -19,7 +19,7 @@ def test_list_incidents(client: TestClient):
 def test_get_dashboard_html(client: TestClient):
     resp = client.get("/")
     assert resp.status_code == 200
-    assert "Sentinel-Ops Cyber Command Center" in resp.text
+    assert "Sentinel-Ops Incident Console" in resp.text
     assert "HUMAN-IN-THE-LOOP APPROVAL GATE" in resp.text
 
 

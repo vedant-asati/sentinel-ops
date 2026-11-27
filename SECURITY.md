@@ -1,20 +1,20 @@
 # Security Policy
 
-## Architectural Security Controls
+## Security Controls
 
-Sentinel-Ops is designed as a **strictly read-only** observability triage engine with defense-in-depth safeguards:
+Sentinel-Ops operates in read-only observability mode and applies the following controls:
 
-1. **Indirect Prompt-Injection Firewall (`sentinel_ops/security/sanitizer.py`):**
-   Untrusted metric labels, error strings, and span payloads are stripped of null bytes, defanged against XML/HTML role-spoofing tags (`<telemetry>`, `<system>`, `<assistant>`, `<evidence>`), length-capped, and wrapped inside delimited non-executable `<telemetry>` blocks.
-2. **Credential & PII Redaction (`sentinel_ops/security/redact.py`, `agents/synthesizer.py`):**
-   Bearer/Basic/OAuth tokens, JWTs, cloud/API keys (`AIza...`, `sk-...`, `AKIA...`, `ghp_...`, `xox...`), PEM private keys, database password URIs, and PII patterns are scrubbed at ingestion and recursively redacted across exported JSON and Markdown briefs.
-3. **Server-Enforced Telemetry & Tool Boundaries (`sentinel_ops/mcp/`, `profiles/schema.py`):**
-   Prometheus and Tempo base URLs come strictly from server configuration (`Settings`), never from LLM arguments. Service names are constrained to the active `SystemProfile` allowlist, trace IDs are regex-validated to prevent path traversal, and inverted time windows are rejected locally.
-4. **Environment Scope & Fail-Closed Verifier (`server/app.py`, `agents/adversarial.py`):**
-   Run queries, SSE streams, cancellations, and brief exports enforce `SENTINEL_ENV_SCOPE` isolation (`403` on mismatch or forged `X-Sentinel-Env` headers). Unrecognized or disabled fault mechanisms fail closed inside the independent verifier.
-5. **Credential Hygiene:**
-   Multi-key Gemini credentials rotate in memory via `GeminiKeyRing`, authenticate via `x-goog-api-key` headers (never URL query strings), and emit only masked prefixes/suffixes in logs.
+1. **Telemetry Sanitization (`sentinel_ops/security/sanitizer.py`):**
+   Metric labels, trace error strings, and span attributes are stripped of null bytes, escaped against role/block delimiters (`<telemetry>`, `<system>`, `<assistant>`, `<evidence>`), length-capped, and wrapped inside `<telemetry>` blocks before prompt construction.
+2. **Secret and PII Redaction (`sentinel_ops/security/redact.py`, `agents/synthesizer.py`):**
+   Bearer/Basic/OAuth headers, JWTs, API keys (`AIza...`, `sk-...`, `AKIA...`, `ghp_...`, `xox...`), PEM keys, database credential URIs, and common PII patterns are scrubbed at observation wrap time and recursively redacted from exported JSON and Markdown incident briefs.
+3. **Server-Side Endpoint Allowlists (`sentinel_ops/mcp/`, `profiles/schema.py`):**
+   Prometheus and Tempo URLs come strictly from server settings rather than model arguments. Service names are validated against the active `SystemProfile`, trace IDs are regex-checked against path traversal, and inverted time windows are rejected before queries run.
+4. **Environment Isolation & Fail-Closed Verification (`server/app.py`, `agents/adversarial.py`):**
+   Run lookups, SSE streams, cancellations, and brief downloads check `SENTINEL_ENV_SCOPE` (`403` on mismatch). Unrecognized or disabled fault mechanisms fail closed inside the claim verifier.
+5. **API Key Handling (`core/llm.py`):**
+   Gemini keys rotate in memory through `GeminiKeyRing`, pass via the `x-goog-api-key` header (not URL query strings), and log only masked prefixes/suffixes.
 
 ## Reporting a Vulnerability
 
-If you discover a security issue or credential exposure risk, please do **not** open a public issue with exploit details. Report privately to **vedant.dev.jsr@gmail.com** with reproduction steps and affected components.
+If you discover a security bug or credential exposure risk, please do not open a public issue with exploit steps. Email details to **vedant.dev.jsr@gmail.com**.

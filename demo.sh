@@ -88,6 +88,6 @@ uv run python -m sentinel_ops.chaos recover
 echo ""
 
 echo -e "${GREEN}${BOLD}✔ Sentinel-Ops Live Demonstration completed successfully!${NC}"
-echo -e "To launch the Web Cyber Command Center, run:"
+echo -e "To launch the Incident Console web UI, run:"
 echo -e "  ${CYAN}cd sentinel-ops && uv run uvicorn sentinel_ops.server.app:app --host 0.0.0.0 --port 8000${NC}"
 echo -e "Then open ${BOLD}http://localhost:8000${NC} in your browser.\n"
